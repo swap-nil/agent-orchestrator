@@ -1,0 +1,20 @@
+# Master agent in the Azure test environment. Speech runs on Azure AI Speech in
+# Switzerland North (AZURE_SPEECH_KEY / AZURE_SPEECH_REGION from Key Vault), so
+# no third-party STT/TTS keys are needed. LIVEKIT_URL and the orchestrator auth
+# scope (MA__ORCHESTRATOR__AUTH_SCOPE) are set by the Helm chart.
+agent_name: master-agent
+stt:
+  provider: azure
+  options: {}
+tts:
+  provider: azure
+  options: {}
+vad:
+  provider: silero
+turn_detection: multilingual
+orchestrator:
+  url: http://orchestrator.orchestrator.svc.cluster.local:8080
+  timeout_ms: 4000
+behaviour:
+  greeting: "Grüezi, this is the test assistant. How can I help you today?"
+  holding_after_ms: 900

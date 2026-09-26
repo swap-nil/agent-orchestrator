@@ -1,0 +1,38 @@
+# Agent registry seed. In production this is generated from the certified
+# registry; card_sha256 pins the approved Agent Card version.
+agents:
+  - name: faq-agent
+    audience: api://faq-agent
+    skills: [faq.answer]
+    certified_in: [dev, test, prod]
+    clearance: [public]
+    card_sha256: ""
+  - name: portfolio-agent
+    audience: api://portfolio-agent
+    skills: [portfolio.holdings]
+    certified_in: [dev, test, prod]
+    clearance: [public, internal, client_confidential]
+  - name: market-agent
+    audience: api://market-agent
+    skills: [market.quotes]
+    certified_in: [dev, test, prod]
+    clearance: [public]
+  - name: advice-agent
+    audience: api://advice-agent
+    skills: [advice.rebalance]
+    certified_in: [dev, test]
+    clearance: [public, internal, client_confidential]
+    cost_units: 3
+  - name: compliance-agent
+    audience: api://compliance-agent
+    skills: [compliance.suitability]
+    certified_in: [dev, test]
+    clearance: [public, internal, client_confidential]
+    cost_units: 2
+  - name: trade-agent
+    audience: api://trade-agent
+    skills: [trade.prepare, trade.execute]
+    certified_in: [dev, test]
+    clearance: [internal, client_confidential]
+    writes_allowed: true
+    cost_units: 2

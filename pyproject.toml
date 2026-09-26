@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-orchestrator"
+version = "1.1.0"
+description = "Enterprise multi-agent orchestrator: LiveKit master agent, A2A domain agents, policy, audit, durable transactions."
+requires-python = ">=3.12"
+readme = "README.md"
+# Core: the orchestration logic itself. Lower bounds only; lock exact versions
+# for deployment with `uv pip compile` or `pip-compile` (see docs/USER_GUIDE.md).
+dependencies = [
+  "PyYAML>=6.0",
+  "PyJWT[crypto]>=2.8",
+  "cryptography>=43",
+]
+
+[project.optional-dependencies]
+api = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "pydantic>=2.8", "httpx[http2]>=0.27"]
+redis = ["redis>=5.0"]
+postgres = ["asyncpg>=0.29"]
+temporal = ["temporalio>=1.7"]
+otel = ["opentelemetry-sdk>=1.27", "opentelemetry-exporter-otlp-proto-grpc>=1.27"]
+agent = [
+  "livekit-agents[deepgram,cartesia,silero,turn-detector,azure]>=1.2",
+  "httpx[http2]>=0.27",
+]
+token-service = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "pydantic>=2.8", "httpx[http2]>=0.27", "livekit-api>=1.0", "redis>=5.0"]
+domain = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "agent-framework>=1.0"]
+# Test environment: mock core-banking API, backend-driven domain agents, test client.
+mock = ["fastapi>=0.115", "uvicorn[standard]>=0.30", "pydantic>=2.8", "httpx[http2]>=0.27"]
+orchestrator = ["agent-orchestrator[api,redis,postgres,temporal,otel]"]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.11"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"orchestrator.console" = ["static/*.html"]
+"test_client" = ["static/*.html"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "S", "UP", "BLE", "ASYNC"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true

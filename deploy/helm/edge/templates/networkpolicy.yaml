@@ -1,0 +1,65 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $public := "{ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]}}" }}
+{{- $fromIngress := printf "{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: %s}}}" .Values.ingress.controllerNamespace }}
+{{- $toOrchestrator := printf "{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: %s}}}" .Values.networkPolicy.orchestratorNamespace }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to: [{namespaceSelector: {}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: token-service
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: token-service}}
+  policyTypes: [Ingress, Egress]
+  ingress: [{from: [{{ $fromIngress }}], ports: [{port: 8090}]}]
+  egress:
+    - {to: [{{ $toOrchestrator }}], ports: [{port: 8080}]}
+    - {to: [{ipBlock: {cidr: {{ .Values.networkPolicy.redisCidr }}}}], ports: [{port: 10000}]}
+    - {to: [{{ $public }}], ports: [{port: 443}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: test-client
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: test-client}}
+  policyTypes: [Ingress, Egress]
+  ingress: [{from: [{{ $fromIngress }}], ports: [{port: 8080}]}]
+  egress:
+    - {to: [{{ $toOrchestrator }}], ports: [{port: 8080}]}
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.agentsNamespace }}}},
+             podSelector: {matchLabels: {app.kubernetes.io/name: mock-backend}}}]
+      ports: [{port: 8080}]
+    - {to: [{{ $public }}], ports: [{port: 443}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: console-proxy
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: console-proxy}}
+  policyTypes: [Ingress, Egress]
+  ingress: [{from: [{{ $fromIngress }}], ports: [{port: 4180}]}]
+  egress:
+    - {to: [{{ $toOrchestrator }}], ports: [{port: 8080}]}
+    - {to: [{{ $public }}], ports: [{port: 443}]}
+---
+# cert-manager's temporary HTTP-01 solver pods (Let's Encrypt validation).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: acme-http01-solver
+spec:
+  podSelector: {matchLabels: {acme.cert-manager.io/http01-solver: "true"}}
+  policyTypes: [Ingress]
+  ingress: [{from: [{{ $fromIngress }}], ports: [{port: 8089}]}]
+{{- end }}

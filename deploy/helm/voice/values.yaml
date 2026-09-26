@@ -1,0 +1,41 @@
+# Shared values from deploy/azure (tenantId, livekitUrl, speechRegion, apps.orchestrator,
+# identities.masterAgent, images.agent, keyVaultName).
+global: {}
+
+image:
+  repository: <acr-name>.azurecr.io/master-agent
+  tag: "1.1.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+# The worker spawns job processes and loads the VAD and turn-detector models.
+resources:
+  requests: {cpu: 500m, memory: 1Gi}
+  limits: {memory: 3Gi}
+
+serviceAccount:
+  name: master-agent
+
+# The worker's model runtimes (transformers, onnxruntime) may write caches outside /tmp;
+# models are baked into the image. Set true to harden once verified with your pinned versions.
+readOnlyRootFilesystem: false
+
+keyVault:
+  enabled: true
+  secrets:
+    ma-dispatch-key: MA_DISPATCH_KEY
+    livekit-api-key: LIVEKIT_API_KEY
+    livekit-api-secret: LIVEKIT_API_SECRET
+    speech-key: AZURE_SPEECH_KEY
+
+# Rendered into /etc/master-agent/master_agent.yaml (e.g. --set-file config.masterAgentYaml=config/master_agent.test.yaml).
+config:
+  masterAgentYaml: ""
+
+extraEnv: []
+
+networkPolicy:
+  enabled: true
+  orchestratorNamespace: orchestrator
+  # LiveKit media: WebRTC over UDP, TCP fallback (7881) and signalling over HTTPS.
+  mediaUdpPorts: {start: 50000, end: 60000}

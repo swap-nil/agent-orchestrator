@@ -1,0 +1,36 @@
+# Shared values from deploy/azure (tenantId, apps.agents, images.mock, approvalPublicKey).
+global: {}
+
+image:
+  repository: <acr-name>.azurecr.io/mock
+  tag: "1.1.0"
+  pullPolicy: IfNotPresent
+
+# Agents from the registry (config/agents.yaml); one Deployment each. Per-agent
+# audiences come from global.apps.agents.<name>.
+agents:
+  - {name: faq-agent, timeout: 5s}
+  - {name: portfolio-agent, timeout: 5s}
+  - {name: market-agent, timeout: 5s}
+  - {name: advice-agent, timeout: 5s}
+  - {name: compliance-agent, timeout: 5s}
+  - {name: trade-agent, timeout: 8s}
+agentReplicas: 1
+agentResources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
+
+mockBackend:
+  resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
+
+gateway:
+  image: envoyproxy/envoy:v1.35.3
+  replicas: 1
+  # Requests per second across all agents (local rate limit per gateway replica).
+  rateLimitPerSecond: 200
+  resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 256Mi}}
+
+networkPolicy:
+  enabled: true
+  # Who may call the A2A gateway.
+  gatewayClientNamespaces: [orchestrator]
+  # Who may read the mock backend besides the agents (the test client shows testers their data).
+  backendClientNamespaces: [edge]

@@ -1,0 +1,24 @@
+# OpenTelemetry Collector: receive OTLP, drop content attributes, export.
+# In Azure, replace the debug exporter with azuremonitor (Application Insights)
+# and/or an OTLP exporter to your Grafana/Tempo stack.
+receivers:
+  otlp:
+    protocols:
+      grpc: {endpoint: 0.0.0.0:4317}
+      http: {endpoint: 0.0.0.0:4318}
+processors:
+  memory_limiter: {check_interval: 1s, limit_percentage: 80, spike_limit_percentage: 20}
+  attributes/strip-content:
+    actions:
+      - {key: gen_ai.input.messages, action: delete}
+      - {key: gen_ai.output.messages, action: delete}
+      - {key: gen_ai.system_instructions, action: delete}
+  batch: {}
+exporters:
+  debug: {verbosity: basic}
+  # azuremonitor:
+  #   connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+service:
+  pipelines:
+    traces: {receivers: [otlp], processors: [memory_limiter, attributes/strip-content, batch], exporters: [debug]}
+    metrics: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [debug]}

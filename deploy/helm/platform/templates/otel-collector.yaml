@@ -1,0 +1,82 @@
+{{- $azure := .Values.otel.azureMonitor -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector
+data:
+  # Same pipeline as deploy/otel/collector.yaml: GenAI content attributes are stripped
+  # before export as a second line of defence.
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc: {endpoint: 0.0.0.0:4317}
+          http: {endpoint: 0.0.0.0:4318}
+    processors:
+      memory_limiter: {check_interval: 1s, limit_percentage: 80, spike_limit_percentage: 20}
+      attributes/strip-content:
+        actions:
+          - {key: gen_ai.input.messages, action: delete}
+          - {key: gen_ai.output.messages, action: delete}
+          - {key: gen_ai.system_instructions, action: delete}
+      batch: {}
+    exporters:
+      debug: {verbosity: basic}
+      {{- if $azure }}
+      azuremonitor:
+        connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+      {{- end }}
+    extensions:
+      health_check: {endpoint: 0.0.0.0:13133}
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces: {receivers: [otlp], processors: [memory_limiter, attributes/strip-content, batch], exporters: [{{ if $azure }}azuremonitor{{ else }}debug{{ end }}]}
+        metrics: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [{{ if $azure }}azuremonitor{{ else }}debug{{ end }}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  labels: {app.kubernetes.io/name: otel-collector, app.kubernetes.io/instance: {{ .Release.Name }}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app.kubernetes.io/name: otel-collector}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: otel-collector}
+      annotations:
+        checksum/azure: {{ $azure | toString | quote }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: otel-collector
+          image: {{ .Values.otel.image }}
+          args: ["--config=/etc/otelcol/config.yaml"]
+          {{- if $azure }}
+          env:
+            - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+              valueFrom: {secretKeyRef: {name: {{ .Values.otel.appInsightsSecret }}, key: connection-string}}
+          {{- end }}
+          ports:
+            - {name: otlp-grpc, containerPort: 4317}
+            - {name: otlp-http, containerPort: 4318}
+            - {name: health, containerPort: 13133}
+          readinessProbe: {httpGet: {path: /, port: health}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /, port: health}, periodSeconds: 15}
+          resources: {{- toYaml .Values.otel.resources | nindent 12 }}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
+          volumeMounts: [{name: config, mountPath: /etc/otelcol, readOnly: true}]
+      volumes:
+        - {name: config, configMap: {name: otel-collector}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+spec:
+  selector: {app.kubernetes.io/name: otel-collector}
+  ports:
+    - {name: otlp-grpc, port: 4317, targetPort: otlp-grpc}
+    - {name: otlp-http, port: 4318, targetPort: otlp-http}

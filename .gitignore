@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.jsonl
+.venv/
+venv/
+*.egg-info/
+# Azure test environment: generated secrets, SSH key, ids, local settings
+deploy/azure/.out/
+deploy/azure/test.env
+# Local tooling
+.ruff_cache/
+.vscode/

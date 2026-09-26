@@ -1,0 +1,11 @@
+.git
+**/__pycache__
+*.pyc
+*.jsonl
+tests
+docs
+# Never send deployment secrets or local environments to the image build (az acr build uploads the context).
+deploy/azure/.out
+deploy/azure/test.env
+.venv
+venv

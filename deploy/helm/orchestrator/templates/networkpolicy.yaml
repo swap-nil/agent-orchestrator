@@ -1,0 +1,37 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: orchestrator}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.ingressNamespaces }}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ . }}}}
+        {{- end }}
+      ports: [{port: 8080}]
+  egress:
+    - to: [{namespaceSelector: {}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    # A2A gateway, Temporal, OTel collector (in-cluster namespaces).
+    - to:
+        {{- range .Values.networkPolicy.egressNamespaces }}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ . }}}}
+        {{- end }}
+    # Private endpoints: Redis, PostgreSQL (one rule per range, only its ports).
+    {{- range .Values.networkPolicy.egressCidrs }}
+    - to: [{ipBlock: {cidr: {{ .cidr }}}}]
+      ports:
+        {{- range .ports }}
+        - {port: {{ . }}, protocol: TCP}
+        {{- end }}
+    {{- end }}
+    {{- if .Values.networkPolicy.egressPublicHttps }}
+    # Entra ID (JWKS, token exchange). NetworkPolicy cannot match host names, so this
+    # allows public HTTPS only; restrict further with Azure Firewall or FQDN policies.
+    - to: [{ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]}}]
+      ports: [{port: 443, protocol: TCP}]
+    {{- end }}
+{{- end }}

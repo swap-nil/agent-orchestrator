@@ -1,0 +1,36 @@
+# Shape of deploy/azure/.out/global.yaml, which deploy.sh generates (all ids here are fake).
+# Every chart reads .Values.global; used by 'make helm-lint'.
+global:
+  tenantId: 11111111-1111-1111-1111-111111111111
+  authorityHost: https://login.microsoftonline.com
+  host: aotest-app.switzerlandnorth.cloudapp.azure.com
+  livekitUrl: wss://aotest-livekit.switzerlandnorth.cloudapp.azure.com
+  keyVaultName: kv-aotest
+  speechRegion: switzerlandnorth
+  images:
+    orchestrator: acraotest.azurecr.io/orchestrator@sha256:aaaa
+    agent: acraotest.azurecr.io/master-agent@sha256:bbbb
+    tokenService: acraotest.azurecr.io/token-service@sha256:cccc
+    mock: acraotest.azurecr.io/mock@sha256:dddd
+  apps:
+    orchestrator: 22222222-0000-0000-0000-000000000001
+    console: 22222222-0000-0000-0000-000000000002
+    spa: 22222222-0000-0000-0000-000000000003
+    agents:
+      faq-agent: 33333333-0000-0000-0000-000000000001
+      portfolio-agent: 33333333-0000-0000-0000-000000000002
+      market-agent: 33333333-0000-0000-0000-000000000003
+      advice-agent: 33333333-0000-0000-0000-000000000004
+      compliance-agent: 33333333-0000-0000-0000-000000000005
+      trade-agent: 33333333-0000-0000-0000-000000000006
+  identities:
+    orchestrator: 44444444-0000-0000-0000-000000000001
+    tokenService: 44444444-0000-0000-0000-000000000002
+    clientBackend: 44444444-0000-0000-0000-000000000003
+    masterAgent: 44444444-0000-0000-0000-000000000004
+    consoleProxy: 44444444-0000-0000-0000-000000000005
+  approvalPublicKey: |
+    -----BEGIN PUBLIC KEY-----
+    MCowBQYDK2VwAyEAabc=
+    -----END PUBLIC KEY-----
+  dnsLabel: aotest-app

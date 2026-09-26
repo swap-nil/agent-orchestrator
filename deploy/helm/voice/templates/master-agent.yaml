@@ -1,0 +1,102 @@
+{{- $g := .Values.global | default dict -}}
+{{- $images := $g.images | default dict -}}
+{{- $apps := $g.apps | default dict -}}
+{{- $ids := $g.identities | default dict -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.serviceAccount.name }}
+  annotations:
+    azure.workload.identity/client-id: {{ required "global.identities.masterAgent is required" $ids.masterAgent | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: master-agent-config
+data:
+  master_agent.yaml: |
+{{ required "config.masterAgentYaml is required" .Values.config.masterAgentYaml | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: master-agent
+  labels: {app.kubernetes.io/name: master-agent, app.kubernetes.io/instance: {{ .Release.Name }}}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector: {matchLabels: {app.kubernetes.io/name: master-agent}}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: master-agent
+        azure.workload.identity/use: "true"
+      annotations:
+        checksum/config: {{ .Values.config.masterAgentYaml | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      # Jobs drain gracefully: LiveKit stops dispatching and running calls may finish.
+      terminationGracePeriodSeconds: 600
+      securityContext: {runAsNonRoot: true, runAsUser: 10001, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: master-agent
+          image: {{ $images.agent | default (printf "%s:%s" .Values.image.repository .Values.image.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "master_agent.agent", "start"]
+          ports: [{name: health, containerPort: 8081}]
+          env:
+            - {name: MA_CONFIG_FILE, value: /etc/master-agent/master_agent.yaml}
+            - {name: LIVEKIT_URL, value: {{ required "global.livekitUrl is required" $g.livekitUrl | quote }}}
+            - {name: AZURE_SPEECH_REGION, value: {{ $g.speechRegion | default "switzerlandnorth" | quote }}}
+            - {name: XDG_CACHE_HOME, value: /tmp/cache}
+            {{- if $apps.orchestrator }}
+            - {name: MA__ORCHESTRATOR__AUTH_SCOPE, value: {{ printf "api://%s/.default" $apps.orchestrator | quote }}}
+            {{- end }}
+            {{- if .Values.keyVault.enabled }}
+            {{- range $kv, $env := .Values.keyVault.secrets }}
+            - name: {{ $env }}
+              valueFrom: {secretKeyRef: {name: master-agent-secrets, key: {{ $kv }}}}
+            {{- end }}
+            {{- end }}
+            {{- range .Values.extraEnv }}
+            - {{ toJson . }}
+            {{- end }}
+          # 503 until the worker is registered with LiveKit.
+          readinessProbe: {httpGet: {path: /, port: health}, periodSeconds: 10, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /, port: health}, initialDelaySeconds: 60, periodSeconds: 20, failureThreshold: 6}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: {{ .Values.readOnlyRootFilesystem }}, capabilities: {drop: ["ALL"]}}
+          volumeMounts:
+            - {name: config, mountPath: /etc/master-agent, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.keyVault.enabled }}
+            - {name: kv, mountPath: /mnt/secrets, readOnly: true}
+            {{- end }}
+      volumes:
+        - {name: config, configMap: {name: master-agent-config}}
+        - {name: tmp, emptyDir: {}}
+        {{- if .Values.keyVault.enabled }}
+        - name: kv
+          csi: {driver: secrets-store.csi.k8s.io, readOnly: true, volumeAttributes: {secretProviderClass: master-agent-kv}}
+        {{- end }}
+{{- if .Values.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: master-agent
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: master-agent}}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to: [{namespaceSelector: {}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+    - to: [{namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ .Values.networkPolicy.orchestratorNamespace }}}}}]
+      ports: [{port: 8080}]
+    # LiveKit (public endpoint), Azure AI Speech, Entra ID.
+    - to: [{ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]}}]
+      ports:
+        - {port: 443, protocol: TCP}
+        - {port: 7881, protocol: TCP}
+        - {port: {{ .Values.networkPolicy.mediaUdpPorts.start }}, endPort: {{ .Values.networkPolicy.mediaUdpPorts.end }}, protocol: UDP}
+{{- end }}

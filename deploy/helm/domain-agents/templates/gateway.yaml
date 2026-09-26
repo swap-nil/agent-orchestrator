@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: a2a-gateway
+  labels: {{- include "da.labels" . | nindent 4 }}
+    app.kubernetes.io/name: a2a-gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector: {matchLabels: {app.kubernetes.io/name: a2a-gateway}}
+  template:
+    metadata:
+      labels:
+        {{- include "da.labels" . | nindent 8 }}
+        app.kubernetes.io/name: a2a-gateway
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/gateway-config.yaml") . | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- include "da.podSecurity" 101 | nindent 6 }}
+      containers:
+        - name: envoy
+          image: {{ .Values.gateway.image }}
+          # Run envoy directly (the image entrypoint switches users, which a non-root pod cannot do).
+          command: ["envoy"]
+          args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info", "--disable-hot-restart"]
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          resources: {{- toYaml .Values.gateway.resources | nindent 12 }}
+          {{- include "da.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/envoy, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - {name: config, configMap: {name: a2a-gateway}}
+        - {name: tmp, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: a2a-gateway
+  labels: {{- include "da.labels" . | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: a2a-gateway}
+  ports: [{name: http, port: 8080, targetPort: http}]

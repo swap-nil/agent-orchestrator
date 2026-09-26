@@ -1,0 +1,106 @@
+{{- $g := .Values.global | default dict -}}
+{{- $agentApps := ($g.apps | default dict).agents | default dict -}}
+{{- $authority := include "da.authority" . -}}
+{{- $jwt := not (empty $g.tenantId) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: a2a-gateway
+  labels: {{- include "da.labels" . | nindent 4 }}
+data:
+  # A2A gateway generated from the agent list. In the test cluster there is no
+  # service mesh, so the listener is plain HTTP inside the cluster; NetworkPolicy
+  # enforces the call graph (orchestrator -> gateway -> agents) instead of SPIFFE
+  # RBAC. Each agent route requires a delegated Entra token whose audience is
+  # that agent's app. See deploy/envoy/a2a-gateway.yaml for the mTLS variant.
+  envoy.yaml: |
+    static_resources:
+      listeners:
+        - name: a2a
+          address: {socket_address: {address: 0.0.0.0, port_value: 8080}}
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: a2a
+                    request_timeout: 10s
+                    max_request_headers_kb: 32
+                    use_remote_address: true
+                    route_config:
+                      name: agents
+                      virtual_hosts:
+                        - name: agents
+                          domains: ["*"]
+                          routes:
+                            - match: {path: /healthz}
+                              direct_response: {status: 200, body: {inline_string: ok}}
+                            {{- range .Values.agents }}
+                            - match: {path: /agents/{{ .name }}}
+                              route: {cluster: {{ .name }}, timeout: {{ .timeout | default "5s" }}{{ if eq .name "trade-agent" }}, retry_policy: {num_retries: 0}{{ end }}}
+                              {{- if $jwt }}
+                              typed_per_filter_config:
+                                envoy.filters.http.jwt_authn:
+                                  "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                                  requirement_name: {{ .name }}
+                              {{- end }}
+                            {{- end }}
+                            - match: {prefix: /}
+                              direct_response: {status: 404, body: {inline_string: unknown agent}}
+                    http_filters:
+                      - name: envoy.filters.http.local_ratelimit
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                          stat_prefix: a2a_rl
+                          token_bucket: {max_tokens: {{ .Values.gateway.rateLimitPerSecond }}, tokens_per_fill: {{ .Values.gateway.rateLimitPerSecond }}, fill_interval: 1s}
+                          filter_enabled: {default_value: {numerator: 100, denominator: HUNDRED}}
+                          filter_enforced: {default_value: {numerator: 100, denominator: HUNDRED}}
+                      {{- if $jwt }}
+                      - name: envoy.filters.http.jwt_authn
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                          providers:
+                            {{- range .Values.agents }}
+                            {{ .name }}:
+                              issuer: {{ printf "%s/%s/v2.0" $authority $g.tenantId }}
+                              audiences: [{{ required (printf "global.apps.agents.%s is required" .name) (index $agentApps .name) | quote }}]
+                              remote_jwks:
+                                http_uri: {uri: {{ printf "%s/%s/discovery/v2.0/keys" $authority $g.tenantId | quote }}, cluster: entra, timeout: 5s}
+                                cache_duration: 3600s
+                                async_fetch: {}
+                              forward: true
+                            {{- end }}
+                          requirement_map:
+                            {{- range .Values.agents }}
+                            {{ .name }}: {provider_name: {{ .name }}}
+                            {{- end }}
+                      {{- end }}
+                      - name: envoy.filters.http.router
+                        typed_config: {"@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router}
+      clusters:
+        {{- range .Values.agents }}
+        - name: {{ .name }}
+          type: STRICT_DNS
+          connect_timeout: 1s
+          load_assignment:
+            cluster_name: {{ .name }}
+            endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: {{ .name }}.{{ $.Release.Namespace }}.svc.cluster.local, port_value: 8080}}}}]}]
+          circuit_breakers: {thresholds: [{max_connections: 200, max_pending_requests: 100, max_requests: 400}]}
+          outlier_detection: {consecutive_5xx: 5, interval: 10s, base_ejection_time: 30s}
+        {{- end }}
+        {{- if $jwt }}
+        - name: entra
+          type: LOGICAL_DNS
+          dns_lookup_family: V4_ONLY
+          connect_timeout: 2s
+          load_assignment:
+            cluster_name: entra
+            endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: {{ trimPrefix "https://" $authority }}, port_value: 443}}}}]}]
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              sni: {{ trimPrefix "https://" $authority }}
+        {{- end }}
+    admin:
+      address: {socket_address: {address: 127.0.0.1, port_value: 9901}}

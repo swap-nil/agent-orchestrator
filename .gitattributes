@@ -1,0 +1,5 @@
+# Scripts executed on Linux (Cloud Shell, VM cloud-init, image builds) must keep LF endings.
+*.sh text eol=lf
+deploy/azure/livekit/* text eol=lf
+deploy/azure/scripts/* text eol=lf
+deploy/docker/Dockerfile text eol=lf

@@ -1,0 +1,81 @@
+# Shared values written by deploy/azure/deploy.sh (tenant, app and identity ids,
+# images pinned by digest, Key Vault). When global.tenantId is set, the chart sets
+# the Entra ID settings as ORCH__ overrides and rewrites agent audiences.
+global: {}
+
+image:
+  repository: <acr-name>.azurecr.io/orchestrator
+  tag: "1.1.0"            # use an immutable digest in production (global.images.orchestrator: repo@sha256:...)
+  pullPolicy: IfNotPresent
+
+cell: chn-cell-01
+replicaCount: 3
+# DoNotSchedule in production (zones are required); ScheduleAnyway for small test clusters.
+zoneSpread: DoNotSchedule
+worker:
+  replicaCount: 2
+  resources: {requests: {cpu: 250m, memory: 256Mi}, limits: {memory: 512Mi}}
+
+resources:
+  requests: {cpu: 500m, memory: 512Mi}
+  limits: {memory: 1Gi}
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 60
+
+podDisruptionBudget:
+  minAvailable: 2
+
+# Audit table migration (idempotent) as an init container of the API pods.
+migrations:
+  enabled: true
+
+serviceAccount:
+  name: orchestrator
+  # Entra Workload ID: federated credential on this managed identity (global.identities.orchestrator wins)
+  workloadIdentityClientId: "<managed-identity-client-id>"
+
+keyVault:
+  enabled: true
+  name: <key-vault-name>
+  tenantId: <tenant-id>
+  # Key Vault secret name -> environment variable
+  secrets:
+    orch-session-key: ORCH_SESSION_KEY
+    orch-approval-key: ORCH_APPROVAL_KEY
+    orch-redis-url: ORCH_REDIS_URL
+    orch-audit-dsn: ORCH_AUDIT_DSN
+    orch-temporal-payload-key: ORCH_TEMPORAL_PAYLOAD_KEY
+
+opa:
+  image: openpolicyagent/opa:1.21.0-static
+  # Health endpoint only (/health, /metrics); the policy API stays on 127.0.0.1:8181.
+  diagnosticPort: 8282
+  resources: {requests: {cpu: 50m, memory: 64Mi}, limits: {memory: 128Mi}}
+
+# Rendered into /etc/orchestrator. Start from config/orchestrator.prod.yaml (or .test.yaml).
+config:
+  orchestratorYaml: ""
+  intentsYaml: ""
+  agentsYaml: ""
+  evalsYaml: ""
+
+# Caller allowlist per route group. Empty: derived from global.identities
+# (turns: master agent; sessions: token service; approvals: client backend; workflows: both).
+routeCallers: {}
+# Additional environment variables, e.g. [{name: ORCH__SERVICE__LOG_LEVEL, value: DEBUG}]
+extraEnv: []
+
+networkPolicy:
+  enabled: true
+  # Namespaces allowed to call the orchestrator (master agent, token service, client backend).
+  ingressNamespaces: [voice, edge]
+  # Egress: A2A gateway, Temporal, OTel collector (by namespace).
+  egressNamespaces: [agents, temporal, observability]
+  # Private endpoints by range and ports, e.g. [{cidr: 10.20.2.0/24, ports: [5432, 10000]}]
+  egressCidrs: []
+  # Public HTTPS for Entra ID (JWKS, token exchange).
+  egressPublicHttps: true

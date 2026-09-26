@@ -1,0 +1,19 @@
+# Token service in the Azure test environment. The Helm chart sets the tenant
+# specific values as TS__... overrides: user_jwt issuer/audience/jwks_url,
+# livekit.url and orchestrator_auth_scope.
+profile: dev   # in-cluster HTTP to the orchestrator; user tokens are still validated (user_jwt is set)
+cell_id: test-cell-01
+orchestrator_url: http://orchestrator.orchestrator.svc.cluster.local:8080
+user_jwt:
+  algorithms: [RS256]
+acr_claim: roles
+acr_levels: [low, standard, stepup]
+livekit:
+  agent_name: master-agent
+  token_ttl_s: 600
+  room_prefix: test
+admission:
+  enabled: true
+  redis_url_env: TS_REDIS_URL
+  max_sessions_per_cell: 200
+allowed_channels: [voice, chat]

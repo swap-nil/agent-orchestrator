@@ -1,0 +1,16 @@
+agent_name: master-agent
+stt:
+  provider: deepgram
+  options: {model: nova-3, language: multi}   # add base_url for a self-hosted endpoint
+tts:
+  provider: cartesia
+  options: {}                                 # voice, model, base_url as supported by the plugin
+vad:
+  provider: silero
+turn_detection: multilingual
+orchestrator:
+  url: http://orchestrator:8080
+  timeout_ms: 4000
+behaviour:
+  greeting: "Grüezi, how can I help you today?"
+  holding_after_ms: 900

@@ -1,0 +1,23 @@
+global: {}
+
+temporal:
+  # Temporal CLI dev server: one process, SQLite on a persistent disk, UI on 8233.
+  # Durable across restarts and sufficient for a test environment; use a Temporal
+  # cluster (Helm chart or Temporal Cloud) for production.
+  image: temporalio/temporal:1.9.1
+  namespace: orchestrator-test
+  storage: {size: 5Gi, storageClassName: managed-csi}
+  resources: {requests: {cpu: 100m, memory: 256Mi}, limits: {memory: 1Gi}}
+
+otel:
+  image: otel/opentelemetry-collector-contrib:0.135.0
+  # Export to Application Insights; the connection string comes from the Secret below
+  # (key "connection-string"), created by deploy/azure/deploy.sh. Off: spans go to stdout.
+  azureMonitor: false
+  appInsightsSecret: appinsights
+  resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+
+networkPolicy:
+  enabled: true
+  temporalClientNamespaces: [orchestrator]
+  telemetryClientNamespaces: [orchestrator, voice, edge, agents]

@@ -1,0 +1,65 @@
+{{- if .Values.networkPolicy.enabled }}
+# Call graph: orchestrator -> a2a-gateway -> agents -> mock-backend. Everything else is denied.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to: [{namespaceSelector: {}, podSelector: {matchLabels: {k8s-app: kube-dns}}}]
+      ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: a2a-gateway
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: a2a-gateway}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        {{- range .Values.networkPolicy.gatewayClientNamespaces }}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ . }}}}
+        {{- end }}
+      ports: [{port: 8080}]
+  egress:
+    - to: [{podSelector: {matchLabels: {component: domain-agent}}}]
+      ports: [{port: 8080}]
+    # Entra ID JWKS.
+    - to: [{ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]}}]
+      ports: [{port: 443, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: domain-agents
+spec:
+  podSelector: {matchLabels: {component: domain-agent}}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: a2a-gateway}}}]
+      ports: [{port: 8080}]
+  egress:
+    - to: [{podSelector: {matchLabels: {app.kubernetes.io/name: mock-backend}}}]
+      ports: [{port: 8080}]
+    # Entra ID JWKS (agents re-verify the delegated token).
+    - to: [{ipBlock: {cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16]}}]
+      ports: [{port: 443, protocol: TCP}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mock-backend
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: mock-backend}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {component: domain-agent}}
+        {{- range .Values.networkPolicy.backendClientNamespaces }}
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: {{ . }}}}
+        {{- end }}
+      ports: [{port: 8080}]
+{{- end }}

@@ -1,0 +1,74 @@
+{{- $g := .Values.global | default dict -}}
+{{- $apps := $g.apps | default dict -}}
+{{- $ids := $g.identities | default dict -}}
+{{- $authority := include "edge.authority" . -}}
+{{- $secrets := dict "name" "token-service" "secrets" .Values.tokenService.keyVaultSecrets -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.tokenService.serviceAccount }}
+  annotations:
+    azure.workload.identity/client-id: {{ required "global.identities.tokenService is required" $ids.tokenService | quote }}
+---
+{{ include "edge.spc" (dict "root" . "name" "token-service" "clientId" $ids.tokenService "secrets" .Values.tokenService.keyVaultSecrets) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: token-service-config
+data:
+  token_service.yaml: |
+{{ required "config.tokenServiceYaml is required" .Values.config.tokenServiceYaml | indent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: token-service
+  labels: {app.kubernetes.io/name: token-service, app.kubernetes.io/instance: {{ .Release.Name }}}
+spec:
+  replicas: {{ .Values.tokenService.replicas }}
+  selector: {matchLabels: {app.kubernetes.io/name: token-service}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: token-service, azure.workload.identity/use: "true"}
+      annotations:
+        checksum/config: {{ .Values.config.tokenServiceYaml | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.tokenService.serviceAccount }}
+      {{- include "edge.podSecurity" 10001 | nindent 6 }}
+      containers:
+        - name: token-service
+          image: {{ required "global.images.tokenService is required" ($g.images | default dict).tokenService | quote }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          command: ["uvicorn", "token_service.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090", "--no-server-header"]
+          ports: [{name: http, containerPort: 8090}]
+          env:
+            - {name: TS_CONFIG_FILE, value: /etc/token-service/token_service.yaml}
+            - {name: TS__USER_JWT__ISSUER, value: {{ printf "%s/%s/v2.0" $authority (required "global.tenantId is required" $g.tenantId) | quote }}}
+            - {name: TS__USER_JWT__AUDIENCE, value: {{ required "global.apps.orchestrator is required" $apps.orchestrator | quote }}}
+            - {name: TS__USER_JWT__JWKS_URL, value: {{ printf "%s/%s/discovery/v2.0/keys" $authority $g.tenantId | quote }}}
+            - {name: TS__LIVEKIT__URL, value: {{ required "global.livekitUrl is required" $g.livekitUrl | quote }}}
+            - {name: TS__ORCHESTRATOR_URL, value: {{ .Values.orchestratorUrl | quote }}}
+            - {name: TS__ORCHESTRATOR_AUTH_SCOPE, value: {{ printf "api://%s/.default" $apps.orchestrator | quote }}}
+            {{- include "edge.secretEnv" $secrets | nindent 12 }}
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          resources: {{- toYaml .Values.tokenService.resources | nindent 12 }}
+          {{- include "edge.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/token-service, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            - {name: kv, mountPath: /mnt/secrets, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: token-service-config}}
+        - {name: tmp, emptyDir: {}}
+        - name: kv
+          csi: {driver: secrets-store.csi.k8s.io, readOnly: true, volumeAttributes: {secretProviderClass: token-service-kv}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: token-service
+spec:
+  selector: {app.kubernetes.io/name: token-service}
+  ports: [{name: http, port: 8090, targetPort: http}]

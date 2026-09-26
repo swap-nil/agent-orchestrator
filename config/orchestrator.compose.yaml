@@ -1,0 +1,28 @@
+# Local full stack (docker compose). Auth is off because there is no mesh locally;
+# everything else uses the production components (Redis, Postgres, OPA, Temporal).
+profile: dev
+service:
+  environment: dev
+  cell_id: compose
+catalogue:
+  intents_file: /app/config/intents.yaml
+  registry_file: /app/config/agents.yaml
+routing:
+  fallback_intent: faq.general
+a2a:
+  gateway_url: http://agents:8443
+  verify_tls: false
+policy:
+  engine: opa
+  opa_url: http://opa:8181
+session:
+  store: redis
+audit:
+  sink: postgres
+workflows:
+  enabled: true
+  temporal_target: temporal:7233
+  namespace: default
+telemetry:
+  enabled: true
+  otlp_endpoint: http://otel-collector:4317

@@ -1,0 +1,108 @@
+# Full local stack. Development secrets only; never reuse these values.
+#   make compose-up
+#   curl -s localhost:8080/readyz
+# See docs/USER_GUIDE.md "Quick start" for a scripted conversation.
+name: agent-orchestrator
+
+x-dev-secrets: &dev-secrets
+  ORCH_REDIS_URL: redis://redis:6379/0
+  ORCH_AUDIT_DSN: postgresql://orch:orch@postgres:5432/orch
+  ORCH_SESSION_KEY: 8r0h0d4xJbA0jYt6oXx3T2mZq6X0qfKf7zH8vGm2b0U=
+  ORCH_APPROVAL_KEY: dev-approval-key-dev-approval-key-dev-approval-key
+  MA_DISPATCH_KEY: dev-dispatch-key-dev-dispatch-key-dev-dispatch-key
+  ORCH_TEMPORAL_PAYLOAD_KEY: bZ3i2Fq8m3cV9d1oQeS0tX5yL7wK4nA6hJ2gR8uT1pE=
+
+services:
+  redis:
+    image: redis:7.4-alpine
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s}
+
+  postgres:
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: orch, POSTGRES_PASSWORD: orch, POSTGRES_DB: orch}
+    healthcheck: {test: ["CMD", "pg_isready", "-U", "orch"], interval: 5s}
+
+  temporal:
+    image: temporalio/auto-setup:1.25
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: orch
+      POSTGRES_PWD: orch
+      POSTGRES_SEEDS: postgres
+    depends_on: {postgres: {condition: service_healthy}}
+    ports: ["7233:7233"]
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    environment: {TEMPORAL_ADDRESS: temporal:7233}
+    ports: ["8233:8080"]
+    depends_on: [temporal]
+
+  opa:
+    image: openpolicyagent/opa:1.0.0
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=info", "/policies/orchestrator.rego"]
+    volumes: ["../../policies:/policies:ro"]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["../otel/collector.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["4317:4317"]
+
+  agents:
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {EXTRAS: api}}
+    command: ["uvicorn", "domain_agents.stub_server:app", "--host", "0.0.0.0", "--port", "8443"]
+
+  orchestrator-migrate:
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {EXTRAS: orchestrator}}
+    command: ["python", "-m", "orchestrator.cli", "migrate-audit"]
+    environment: {<<: *dev-secrets, ORCH_CONFIG_FILE: /app/config/orchestrator.compose.yaml}
+    depends_on: {postgres: {condition: service_healthy}}
+
+  orchestrator:
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {EXTRAS: orchestrator}}
+    environment: {<<: *dev-secrets, ORCH_CONFIG_FILE: /app/config/orchestrator.compose.yaml}
+    ports: ["8080:8080"]
+    depends_on:
+      redis: {condition: service_healthy}
+      orchestrator-migrate: {condition: service_completed_successfully}
+      temporal: {condition: service_started}
+      opa: {condition: service_started}
+      agents: {condition: service_started}
+
+  worker:
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {EXTRAS: orchestrator}}
+    command: ["python", "-m", "orchestrator.workflows.worker"]
+    environment: {<<: *dev-secrets, ORCH_CONFIG_FILE: /app/config/orchestrator.compose.yaml}
+    depends_on: [orchestrator]
+
+  livekit:
+    image: livekit/livekit-server:v1.8
+    command: ["--dev", "--bind", "0.0.0.0"]
+    ports: ["7880:7880", "7881:7881", "50000-50100:50000-50100/udp"]
+
+  token-service:
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {EXTRAS: token-service}}
+    command: ["uvicorn", "token_service.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090"]
+    environment:
+      <<: *dev-secrets
+      TS_CONFIG_FILE: /app/config/token_service.yaml
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+    ports: ["8090:8090"]
+    depends_on: [orchestrator, livekit]
+
+  master-agent:
+    profiles: ["voice"]   # needs STT/TTS credentials: DEEPGRAM_API_KEY, CARTESIA_API_KEY
+    build: {context: ../.., dockerfile: deploy/docker/Dockerfile, args: {EXTRAS: agent}}
+    command: ["python", "-m", "master_agent.agent", "start"]
+    environment:
+      <<: *dev-secrets
+      MA_CONFIG_FILE: /app/config/master_agent.yaml
+      LIVEKIT_URL: ws://livekit:7880
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY:-}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY:-}
+    depends_on: [livekit, orchestrator]

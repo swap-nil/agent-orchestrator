@@ -1,0 +1,101 @@
+# Production profile. Secrets come from environment variables named *_env
+# (mounted from Key Vault via the CSI driver). Values here are examples.
+profile: prod
+service:
+  name: orchestrator
+  environment: prod
+  cell_id: chn-cell-01
+  region: switzerlandnorth
+  log_level: INFO
+auth:
+  mode: mesh_xfcc
+  route_callers:
+    turns: [spiffe://bank.internal/ns/voice/sa/master-agent]
+    workflows: [spiffe://bank.internal/ns/voice/sa/master-agent, spiffe://bank.internal/ns/edge/sa/client-backend]
+    sessions: [spiffe://bank.internal/ns/edge/sa/token-service]
+    approvals: [spiffe://bank.internal/ns/edge/sa/client-backend]
+    admin: [spiffe://bank.internal/ns/platform/sa/ops-console]
+  user_jwt:
+    issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+    audience: api://orchestrator
+    jwks_url: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
+    algorithms: [RS256]
+  user_subject_claim: oid
+  user_acr_claim: acrs
+  user_tenant_claim: tid
+  acr_levels: [low, standard, stepup]
+  approval_min_acr: stepup
+catalogue:
+  intents_file: /etc/orchestrator/intents.yaml
+  registry_file: /etc/orchestrator/agents.yaml
+routing:
+  min_confidence: {R0: 0.5, R1: 0.6, R2: 0.8, R3: 0.9}
+  max_clarification_rounds: 2
+  fallback_intent: faq.general
+budgets:
+  turn_deadline_ms: 2500
+  max_steps: 8
+  max_depth: 3
+  max_fan_out: 4
+execution:
+  default_step_timeout_ms: 1500
+  read_retries: 2
+a2a:
+  gateway_url: https://a2a-gateway.agents.svc.cluster.local:8443
+  protocol_version: "1.0"
+  verify_tls: true
+  ca_bundle: /etc/ssl/mesh/ca.pem
+  client_cert_file: /var/run/spiffe/svid.pem
+  client_key_file: /var/run/spiffe/svid.key
+policy:
+  engine: opa
+  opa_url: http://127.0.0.1:8181
+  timeout_ms: 250
+identity:
+  mode: entra_obo
+  token_endpoint: https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token
+  client_id: <orchestrator-app-id>
+  sender_constraint: mtls
+session:
+  store: redis
+  redis_url_env: ORCH_REDIS_URL
+  token_encryption_key_env: ORCH_SESSION_KEY
+audit:
+  sink: postgres
+  postgres_dsn_env: ORCH_AUDIT_DSN
+  fail_turn_on_audit_error: true
+guards:
+  injection_action: block
+admission:
+  max_concurrent_turns: 200
+  soft_limit_ratio: 0.8
+  hard_limit_ratio: 1.0
+workflows:
+  enabled: true
+  temporal_target: temporal-frontend.temporal.svc.cluster.local:7233
+  namespace: orchestrator-prod
+  task_queue: orchestrator-transactions
+  approval_timeout_s: 600
+  tls: true
+telemetry:
+  enabled: true
+  otlp_endpoint: http://otel-collector.observability.svc.cluster.local:4317
+  capture_content: false
+command_center:
+  enabled: true
+  event_bus: redis
+  stream_key: orch:chn-cell-01:events
+  operator_auth: jwt
+  operator_jwt:
+    issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+    audience: api://orchestrator-console
+    jwks_url: https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys
+    algorithms: [RS256]
+  role_members:
+    viewer: [CC.Viewer]
+    operator: [CC.Operator]
+    investigator: [CC.Investigator]
+    approver: [CC.ChangeApprover]
+  show_utterances: false
+  require_four_eyes: true
+  evals_file: /etc/orchestrator/evals.yaml

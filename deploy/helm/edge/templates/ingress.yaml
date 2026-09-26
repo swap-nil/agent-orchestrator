@@ -1,0 +1,79 @@
+{{- $g := .Values.global | default dict -}}
+{{- $host := required "global.host is required" $g.host -}}
+{{- $ranges := join "," .Values.ingress.allowedSourceRanges -}}
+{{- if .Values.ingress.createController }}
+# Dedicated application-routing NGINX controller with a public IP and Azure DNS label.
+apiVersion: approuting.kubernetes.azure.com/v1alpha1
+kind: NginxIngressController
+metadata:
+  name: {{ .Values.ingress.className }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  controllerNamePrefix: {{ .Values.ingress.className }}
+  loadBalancerAnnotations:
+    service.beta.kubernetes.io/azure-dns-label-name: {{ required "global.dnsLabel is required" $g.dnsLabel | quote }}
+---
+{{- end }}
+{{- if .Values.certManager.createIssuer }}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.certManager.issuerName }}
+spec:
+  acme:
+    server: {{ .Values.certManager.server }}
+    email: {{ required "certManager.email is required (Let's Encrypt account)" .Values.certManager.email | quote }}
+    privateKeySecretRef: {name: {{ .Values.certManager.issuerName }}-account}
+    solvers:
+      - http01:
+          ingress: {ingressClassName: {{ .Values.ingress.className }}}
+---
+{{- end }}
+# Test client, token service (the only API exposed to the internet) and the OAuth callback.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: edge
+  annotations:
+    cert-manager.io/cluster-issuer: {{ .Values.certManager.issuerName }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 64k
+    # oauth2-proxy session cookies and Entra redirects produce large headers.
+    nginx.ingress.kubernetes.io/proxy-buffer-size: 32k
+    {{- if $ranges }}
+    nginx.ingress.kubernetes.io/whitelist-source-range: {{ $ranges | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls: [{hosts: [{{ $host | quote }}], secretName: edge-tls}]
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - {path: /v1/voice-sessions, pathType: Exact, backend: {service: {name: token-service, port: {number: 8090}}}}
+          - {path: /oauth2, pathType: Prefix, backend: {service: {name: console-proxy, port: {number: 4180}}}}
+          - {path: /, pathType: Prefix, backend: {service: {name: test-client, port: {number: 8080}}}}
+---
+# Command center behind the sign-in proxy; the live stream is server-sent events (no buffering).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: console
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: 64k
+    nginx.ingress.kubernetes.io/proxy-buffer-size: 32k
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    {{- if $ranges }}
+    nginx.ingress.kubernetes.io/whitelist-source-range: {{ $ranges | quote }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls: [{hosts: [{{ $host | quote }}], secretName: edge-tls}]
+  rules:
+    - host: {{ $host | quote }}
+      http:
+        paths:
+          - {path: /console, pathType: Prefix, backend: {service: {name: console-proxy, port: {number: 4180}}}}
+          - {path: /admin/cc, pathType: Prefix, backend: {service: {name: console-proxy, port: {number: 4180}}}}

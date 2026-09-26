@@ -1,0 +1,9 @@
+profile: dev
+cell_id: compose
+orchestrator_url: http://orchestrator:8080
+livekit:
+  url: ws://localhost:7880
+  agent_name: master-agent
+  token_ttl_s: 600
+admission:
+  enabled: false

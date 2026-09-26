@@ -1,0 +1,22 @@
+# Development profile: everything in memory, local policy engine, no auth.
+profile: dev
+service:
+  environment: dev
+  cell_id: local
+catalogue:
+  intents_file: config/intents.yaml
+  registry_file: config/agents.yaml
+routing:
+  fallback_intent: faq.general
+a2a:
+  gateway_url: http://localhost:8443
+  verify_tls: false
+policy:
+  engine: local
+session:
+  store: memory
+audit:
+  sink: jsonl
+  jsonl_path: audit.dev.jsonl
+workflows:
+  enabled: false

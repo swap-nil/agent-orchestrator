@@ -1,0 +1,99 @@
+{{- $g := .Values.global | default dict -}}
+{{- $agentApps := ($g.apps | default dict).agents | default dict -}}
+{{- range .Values.agents }}
+{{- $name := .name }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "da.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+    component: domain-agent
+spec:
+  replicas: {{ $.Values.agentReplicas }}
+  selector: {matchLabels: {app.kubernetes.io/name: {{ $name }}}}
+  template:
+    metadata:
+      labels:
+        {{- include "da.labels" $ | nindent 8 }}
+        app.kubernetes.io/name: {{ $name }}
+        component: domain-agent
+    spec:
+      automountServiceAccountToken: false
+      {{- include "da.podSecurity" 10001 | nindent 6 }}
+      containers:
+        - name: agent
+          image: {{ include "da.image" $ | quote }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          command: ["uvicorn", "domain_agents.serve:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: AGENT_NAMES, value: {{ $name | quote }}}
+            - {name: MOCK_BACKEND_URL, value: "http://mock-backend:8080"}
+            {{- if $g.tenantId }}
+            - {name: AGENT_AUDIENCE, value: {{ required (printf "global.apps.agents.%s is required" $name) (index $agentApps $name) | quote }}}
+            - {name: AGENT_TOKEN_ISSUER, value: {{ printf "%s/%s/v2.0" (include "da.authority" $) $g.tenantId | quote }}}
+            - {name: AGENT_JWKS_URL, value: {{ printf "%s/%s/discovery/v2.0/keys" (include "da.authority" $) $g.tenantId | quote }}}
+            {{- end }}
+            {{- if and (eq $name "trade-agent") $g.approvalPublicKey }}
+            - name: APPROVAL_PUBLIC_KEY
+              value: {{ $g.approvalPublicKey | quote }}
+            {{- end }}
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          resources: {{- toYaml $.Values.agentResources | nindent 12 }}
+          {{- include "da.containerSecurity" $ | nindent 10 }}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels: {{- include "da.labels" $ | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: {{ $name }}}
+  ports: [{name: http, port: 8080, targetPort: http}]
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mock-backend
+  labels: {{- include "da.labels" . | nindent 4 }}
+    app.kubernetes.io/name: mock-backend
+spec:
+  # One replica: the fake bank keeps its state (orders, positions) in memory.
+  replicas: 1
+  strategy: {type: Recreate}
+  selector: {matchLabels: {app.kubernetes.io/name: mock-backend}}
+  template:
+    metadata:
+      labels:
+        {{- include "da.labels" . | nindent 8 }}
+        app.kubernetes.io/name: mock-backend
+    spec:
+      automountServiceAccountToken: false
+      {{- include "da.podSecurity" 10001 | nindent 6 }}
+      containers:
+        - name: mock-backend
+          image: {{ include "da.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["uvicorn", "mock_backend.app:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          resources: {{- toYaml .Values.mockBackend.resources | nindent 12 }}
+          {{- include "da.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mock-backend
+  labels: {{- include "da.labels" . | nindent 4 }}
+spec:
+  selector: {app.kubernetes.io/name: mock-backend}
+  ports: [{name: http, port: 8080, targetPort: http}]

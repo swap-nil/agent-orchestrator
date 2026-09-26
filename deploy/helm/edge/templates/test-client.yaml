@@ -1,0 +1,54 @@
+{{- $g := .Values.global | default dict -}}
+{{- $apps := $g.apps | default dict -}}
+{{- $ids := $g.identities | default dict -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ .Values.testClient.serviceAccount }}
+  annotations:
+    # The client backend's identity: listed in the orchestrator's route_callers for approvals.
+    azure.workload.identity/client-id: {{ required "global.identities.clientBackend is required" $ids.clientBackend | quote }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-client
+  labels: {app.kubernetes.io/name: test-client, app.kubernetes.io/instance: {{ .Release.Name }}}
+spec:
+  replicas: {{ .Values.testClient.replicas }}
+  selector: {matchLabels: {app.kubernetes.io/name: test-client}}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: test-client, azure.workload.identity/use: "true"}
+    spec:
+      serviceAccountName: {{ .Values.testClient.serviceAccount }}
+      {{- include "edge.podSecurity" 10001 | nindent 6 }}
+      containers:
+        - name: test-client
+          image: {{ required "global.images.mock is required" ($g.images | default dict).mock | quote }}
+          imagePullPolicy: {{ .Values.pullPolicy }}
+          command: ["uvicorn", "test_client.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: TENANT_ID, value: {{ required "global.tenantId is required" $g.tenantId | quote }}}
+            - {name: AUTHORITY_HOST, value: {{ include "edge.authority" . | quote }}}
+            - {name: SPA_CLIENT_ID, value: {{ required "global.apps.spa is required" $apps.spa | quote }}}
+            - {name: ORCHESTRATOR_APP_ID, value: {{ required "global.apps.orchestrator is required" $apps.orchestrator | quote }}}
+            - {name: ORCHESTRATOR_URL, value: {{ .Values.orchestratorUrl | quote }}}
+            - {name: ORCHESTRATOR_AUTH_SCOPE, value: {{ printf "api://%s/.default" $apps.orchestrator | quote }}}
+            - {name: MOCK_BACKEND_URL, value: {{ .Values.mockBackendUrl | quote }}}
+            - {name: TOKEN_SERVICE_PATH, value: /v1/voice-sessions}
+          readinessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 5}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10}
+          resources: {{- toYaml .Values.testClient.resources | nindent 12 }}
+          {{- include "edge.containerSecurity" . | nindent 10 }}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+      volumes: [{name: tmp, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: test-client
+spec:
+  selector: {app.kubernetes.io/name: test-client}
+  ports: [{name: http, port: 8080, targetPort: http}]

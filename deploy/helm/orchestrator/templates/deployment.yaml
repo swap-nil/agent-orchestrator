@@ -1,0 +1,121 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  labels: {{- include "orch.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector: {matchLabels: {app.kubernetes.io/name: orchestrator, component: api}}
+  strategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 0, maxSurge: 1}}
+  template:
+    metadata:
+      labels:
+        {{- include "orch.labels" . | nindent 8 }}
+        component: api
+        azure.workload.identity/use: "true"
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      automountServiceAccountToken: true
+      {{- include "orch.podSecurity" . | nindent 6 }}
+      topologySpreadConstraints:
+        - {maxSkew: 1, topologyKey: topology.kubernetes.io/zone, whenUnsatisfiable: {{ .Values.zoneSpread }},
+           labelSelector: {matchLabels: {app.kubernetes.io/name: orchestrator, component: api}}}
+      terminationGracePeriodSeconds: 30
+      {{- if .Values.migrations.enabled }}
+      # Creates the audit table (idempotent) before the API starts.
+      initContainers:
+        - name: migrate-audit
+          image: {{ include "orch.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "orchestrator.cli", "migrate-audit"]
+          env:
+            - {name: ORCH_CONFIG_FILE, value: /etc/orchestrator/orchestrator.yaml}
+            {{- include "orch.secretEnv" . | nindent 12 }}
+            {{- include "orch.entraEnv" . | nindent 12 }}
+          resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
+          {{- include "orch.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/orchestrator, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.keyVault.enabled }}
+            - {name: kv, mountPath: /mnt/secrets, readOnly: true}
+            {{- end }}
+      {{- end }}
+      containers:
+        - name: orchestrator
+          image: {{ include "orch.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports: [{name: http, containerPort: 8080}]
+          env:
+            - {name: ORCH_CONFIG_FILE, value: /etc/orchestrator/orchestrator.yaml}
+            {{- include "orch.secretEnv" . | nindent 12 }}
+            {{- include "orch.entraEnv" . | nindent 12 }}
+          readinessProbe: {httpGet: {path: /readyz, port: http}, periodSeconds: 5, failureThreshold: 3}
+          livenessProbe: {httpGet: {path: /healthz, port: http}, periodSeconds: 10, failureThreshold: 3}
+          lifecycle: {preStop: {exec: {command: ["sleep", "5"]}}}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- include "orch.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/orchestrator, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.keyVault.enabled }}
+            - {name: kv, mountPath: /mnt/secrets, readOnly: true}
+            {{- end }}
+        {{- include "orch.opaSidecar" . | nindent 8 }}
+      volumes:
+        - {name: config, configMap: {name: orchestrator-config}}
+        - {name: policy, configMap: {name: orchestrator-policy}}
+        - {name: tmp, emptyDir: {}}
+        {{- if .Values.keyVault.enabled }}
+        - name: kv
+          csi: {driver: secrets-store.csi.k8s.io, readOnly: true, volumeAttributes: {secretProviderClass: orchestrator-kv}}
+        {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator-worker
+  labels: {{- include "orch.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  selector: {matchLabels: {app.kubernetes.io/name: orchestrator, component: worker}}
+  template:
+    metadata:
+      labels:
+        {{- include "orch.labels" . | nindent 8 }}
+        component: worker
+        azure.workload.identity/use: "true"
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      automountServiceAccountToken: true
+      {{- include "orch.podSecurity" . | nindent 6 }}
+      containers:
+        - name: worker
+          image: {{ include "orch.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-m", "orchestrator.workflows.worker"]
+          env:
+            - {name: ORCH_CONFIG_FILE, value: /etc/orchestrator/orchestrator.yaml}
+            {{- include "orch.secretEnv" . | nindent 12 }}
+            {{- include "orch.entraEnv" . | nindent 12 }}
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+          {{- include "orch.containerSecurity" . | nindent 10 }}
+          volumeMounts:
+            - {name: config, mountPath: /etc/orchestrator, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+            {{- if .Values.keyVault.enabled }}
+            - {name: kv, mountPath: /mnt/secrets, readOnly: true}
+            {{- end }}
+        {{- include "orch.opaSidecar" . | nindent 8 }}
+      volumes:
+        - {name: config, configMap: {name: orchestrator-config}}
+        - {name: policy, configMap: {name: orchestrator-policy}}
+        - {name: tmp, emptyDir: {}}
+        {{- if .Values.keyVault.enabled }}
+        - name: kv
+          csi: {driver: secrets-store.csi.k8s.io, readOnly: true, volumeAttributes: {secretProviderClass: orchestrator-kv}}
+        {{- end }}

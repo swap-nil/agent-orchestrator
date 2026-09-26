@@ -1,0 +1,57 @@
+# Shared values from deploy/azure (tenantId, host, dnsLabel, livekitUrl, apps, identities,
+# images.tokenService / images.mock, keyVaultName).
+global: {}
+
+pullPolicy: IfNotPresent
+orchestratorUrl: http://orchestrator.orchestrator.svc.cluster.local:8080
+mockBackendUrl: http://mock-backend.agents.svc.cluster.local:8080
+
+tokenService:
+  replicas: 1
+  serviceAccount: token-service
+  resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 384Mi}}
+  keyVaultSecrets:
+    ma-dispatch-key: MA_DISPATCH_KEY
+    livekit-api-key: LIVEKIT_API_KEY
+    livekit-api-secret: LIVEKIT_API_SECRET
+    orch-redis-url: TS_REDIS_URL
+
+testClient:
+  replicas: 1
+  serviceAccount: test-client
+  resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
+
+consoleProxy:
+  image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+  replicas: 1
+  serviceAccount: console-proxy
+  resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 256Mi}}
+  keyVaultSecrets:
+    console-client-secret: OAUTH2_PROXY_CLIENT_SECRET
+    console-cookie-secret: OAUTH2_PROXY_COOKIE_SECRET
+
+# Rendered into /etc/token-service/token_service.yaml (--set-file config.tokenServiceYaml=config/token_service.test.yaml).
+config:
+  tokenServiceYaml: ""
+
+ingress:
+  # AKS application routing (managed NGINX). A dedicated controller gets a public IP
+  # with the Azure DNS label global.dnsLabel -> <label>.<region>.cloudapp.azure.com.
+  createController: true
+  className: aotest-public
+  controllerNamespace: app-routing-system
+  # Optional source IP allowlist for everything on the host, e.g. ["203.0.113.0/24"].
+  allowedSourceRanges: []
+
+certManager:
+  createIssuer: true
+  issuerName: letsencrypt
+  email: ""
+  server: https://acme-v02.api.letsencrypt.org/directory
+
+networkPolicy:
+  enabled: true
+  orchestratorNamespace: orchestrator
+  agentsNamespace: agents
+  # Redis private endpoint (token service admission), must match deploy/azure/main.bicep.
+  redisCidr: 10.60.9.0/24

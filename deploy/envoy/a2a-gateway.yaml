@@ -1,0 +1,105 @@
+# A2A mesh gateway (Envoy v3 API). Representative config for two agents;
+# generate the routes, clusters and JWT providers from the agent registry.
+#
+# What it enforces:
+#   * mTLS from callers (orchestrator / agents) with SPIFFE SVIDs
+#   * XFCC header: SANITIZE_SET, so callers cannot forge identity downstream
+#   * delegated token per agent: issuer, audience = the agent, expiry
+#   * call graph: only listed caller SPIFFE IDs may reach each agent (RBAC)
+#   * local rate limits per route; strict timeouts; no retries on POST writes
+static_resources:
+  listeners:
+    - name: a2a_ingress
+      address: {socket_address: {address: 0.0.0.0, port_value: 8443}}
+      filter_chains:
+        - transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_params: {tls_minimum_protocol_version: TLSv1_3}
+                tls_certificate_sds_secret_configs: [{name: gateway_svid, sds_config: {path_config_source: {path: /etc/envoy/sds/svid.yaml}}}]
+                validation_context_sds_secret_config: {name: spiffe_bundle, sds_config: {path_config_source: {path: /etc/envoy/sds/bundle.yaml}}}
+          filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: a2a
+                forward_client_cert_details: SANITIZE_SET
+                set_current_client_cert_details: {uri: true}
+                request_timeout: 10s
+                max_request_headers_kb: 32
+                tracing: {}
+                route_config:
+                  name: agents
+                  virtual_hosts:
+                    - name: agents
+                      domains: ["*"]
+                      routes:
+                        - match: {path: /agents/portfolio-agent}
+                          route: {cluster: portfolio-agent, timeout: 5s}
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              requirement_name: portfolio
+                        - match: {path: /agents/trade-agent}
+                          route: {cluster: trade-agent, timeout: 8s, retry_policy: {num_retries: 0}}
+                          typed_per_filter_config:
+                            envoy.filters.http.jwt_authn:
+                              "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.PerRouteConfig
+                              requirement_name: trade
+                http_filters:
+                  - name: envoy.filters.http.local_ratelimit
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+                      stat_prefix: a2a_rl
+                      token_bucket: {max_tokens: 500, tokens_per_fill: 500, fill_interval: 1s}
+                      filter_enabled: {default_value: {numerator: 100, denominator: HUNDRED}}
+                      filter_enforced: {default_value: {numerator: 100, denominator: HUNDRED}}
+                  - name: envoy.filters.http.jwt_authn
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.jwt_authn.v3.JwtAuthentication
+                      providers:
+                        entra_portfolio:
+                          issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+                          audiences: [api://portfolio-agent]
+                          remote_jwks: {http_uri: {uri: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys", cluster: entra, timeout: 2s}, cache_duration: 3600s}
+                          forward: true
+                        entra_trade:
+                          issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+                          audiences: [api://trade-agent]
+                          remote_jwks: {http_uri: {uri: "https://login.microsoftonline.com/<tenant-id>/discovery/v2.0/keys", cluster: entra, timeout: 2s}, cache_duration: 3600s}
+                          forward: true
+                      requirement_map:
+                        portfolio: {provider_name: entra_portfolio}
+                        trade: {provider_name: entra_trade}
+                  - name: envoy.filters.http.rbac
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.rbac.v3.RBAC
+                      rules:
+                        action: ALLOW
+                        policies:
+                          orchestrator-to-agents:
+                            permissions: [{url_path: {path: {prefix: /agents/}}}]
+                            principals: [{authenticated: {principal_name: {exact: spiffe://bank.internal/ns/orchestrator/sa/orchestrator}}}]
+                  - name: envoy.filters.http.router
+                    typed_config: {"@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router}
+  clusters:
+    - name: portfolio-agent
+      type: STRICT_DNS
+      connect_timeout: 1s
+      load_assignment: {cluster_name: portfolio-agent, endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: portfolio-agent.agents.svc.cluster.local, port_value: 9001}}}}]}]}
+      circuit_breakers: {thresholds: [{max_connections: 200, max_pending_requests: 100, max_requests: 400}]}
+      outlier_detection: {consecutive_5xx: 5, interval: 10s, base_ejection_time: 30s}
+    - name: trade-agent
+      type: STRICT_DNS
+      connect_timeout: 1s
+      load_assignment: {cluster_name: trade-agent, endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: trade-agent.agents.svc.cluster.local, port_value: 9002}}}}]}]}
+    - name: entra
+      type: LOGICAL_DNS
+      connect_timeout: 2s
+      load_assignment: {cluster_name: entra, endpoints: [{lb_endpoints: [{endpoint: {address: {socket_address: {address: login.microsoftonline.com, port_value: 443}}}}]}]}
+      transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config: {"@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext, sni: login.microsoftonline.com}
