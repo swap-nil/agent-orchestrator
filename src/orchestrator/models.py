@@ -10,6 +10,8 @@ import enum
 from dataclasses import dataclass, field
 from typing import Any
 
+from .slots import SlotSpec
+
 
 class RiskClass(str, enum.Enum):
     R0 = "R0"  # public information
@@ -80,6 +82,8 @@ class StepSpec:
     data_classes: tuple[str, ...] = ("internal",)
     cost_units: int = 1
     instruction: str = ""
+    # R0 public steps only: receive the (PII-redacted) question as data.query, e.g. to search a knowledge base.
+    include_query: bool = False
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,11 @@ class Intent:
     quorum: str | None = None
     clarification_prompt: str = ""
     readback_template: str = ""
+    # Short phrase for "did you mean A or B?" questions, e.g. "a rebalancing suggestion".
+    label: str = ""
+    # A request matching any of these never reaches this intent ("should I sell ..." is advice, not a trade).
+    exclude_patterns: tuple[str, ...] = ()
+    slots: tuple[SlotSpec, ...] = ()
 
     @property
     def has_writes(self) -> bool:

@@ -9,18 +9,24 @@ checks it against the action hash and verifies the orchestrator's Ed25519
 approval token before calling the order API.
 
 Agents only receive the catalogue instruction and earlier steps' data, never
-the user's words, so the FAQ agent answers with featured articles and the trade
-agent proposes a deterministic order (10 percent of the largest position),
-which the read-back states exactly before the user approves.
+the user's words, with two structured exceptions: the FAQ agent gets the
+redacted question (``data.query``, public R0 step) to search the knowledge
+base, and the trade agent gets the slots the orchestrator extracted
+(``data.slots``: which holding, how much). The trade agent resolves the
+holding against the customer's positions and asks back (input-required,
+``data.missing``) instead of guessing when it is not held, ambiguous or the
+quantity is missing or too large.
 """
 
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
 from orchestrator.approvals import action_hash, verify_approval_token
+from orchestrator.slots import match_instruments, units_for
 
 from .kit import DomainAgent, SkillHandler, SkillRequest, SkillResult, TokenVerifier
 
@@ -50,7 +56,8 @@ class BankTools:
         return (await self._call("GET", "/v1/market/indices"))["indices"]
 
     async def articles(self, query: str = "") -> list[dict[str, str]]:
-        return (await self._call("GET", f"/v1/kb/articles?q={query}"))["articles"]
+        path = "/v1/kb/articles" + (f"?{urlencode({'q': query[:500]})}" if query else "")
+        return (await self._call("GET", path))["articles"]
 
     async def rebalance(self, subject: str) -> dict[str, Any]:
         return await self._call("POST", "/v1/advice/rebalance", subject)
@@ -58,8 +65,8 @@ class BankTools:
     async def suitability(self, subject: str, proposal: dict[str, Any] | None) -> dict[str, Any]:
         return await self._call("POST", "/v1/compliance/suitability", subject, {"proposal": proposal})
 
-    async def quote(self, subject: str) -> dict[str, Any]:
-        return await self._call("POST", "/v1/orders/quote", subject, {})
+    async def quote(self, subject: str, instrument_id: str = "", quantity: int = 0) -> dict[str, Any]:
+        return await self._call("POST", "/v1/orders/quote", subject, {"instrument_id": instrument_id, "quantity": quantity})
 
     async def place_order(self, subject: str, action: dict[str, Any], idempotency_key: str) -> dict[str, Any]:
         return await self._call("POST", "/v1/orders", subject, {"action": action}, {"Idempotency-Key": idempotency_key})
@@ -84,6 +91,45 @@ def _first_input(req: SkillRequest, step: str, key: str) -> Any:
     return None
 
 
+INPUT_REQUIRED = "TASK_STATE_INPUT_REQUIRED"
+
+
+def _names(positions: list[dict[str, Any]]) -> str:
+    names = [f"the {p['instrument']}" for p in positions]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+
+
+def resolve_sale(slots: dict[str, Any], positions: list[dict[str, Any]], source: str) -> tuple[dict[str, Any], int] | SkillResult:
+    """The position and units the customer asked to sell, or a question back when that is not clear.
+
+    Never falls back to a default holding or quantity: a guess here is an order the customer did not ask for.
+    """
+    def ask(text: str, missing: str) -> SkillResult:
+        return SkillResult(text, [source], "client_confidential", {"missing": missing}, state=INPUT_REQUIRED)
+
+    if not positions:
+        return SkillResult("You currently hold no investments with us, so there is nothing to sell.", [source],
+                           "client_confidential", {}, state=INPUT_REQUIRED)
+    query = str((slots.get("instrument") or {}).get("query", ""))
+    if not query:
+        return ask(f"Which holding would you like to sell? You hold {_names(positions)}.", "instrument")
+    hits = match_instruments(query, positions)
+    if not hits:
+        return ask(f"I can't find {query} in your portfolio. You hold {_names(positions)}. Which would you like to sell?",
+                   "instrument")
+    if len(hits) > 1:
+        return ask(f"You hold more than one that matches: {_names(hits)}. Which one would you like to sell?", "instrument")
+    pos = hits[0]
+    quantity = slots.get("quantity")
+    if not isinstance(quantity, dict) or not quantity:
+        return ask(f"You hold {pos['units']} units of the {pos['instrument']}. How many would you like to sell?", "quantity")
+    units = units_for(quantity, int(pos["units"]))
+    if units > int(pos["units"]):
+        return ask(f"You hold only {pos['units']} units of the {pos['instrument']}. How many would you like to sell?",
+                   "quantity")
+    return pos, units
+
+
 def require_scope(skill: str, handler: SkillHandler) -> SkillHandler:
     """With a verified token, the delegated scope (``scp``) must name the skill being called."""
 
@@ -100,7 +146,10 @@ def build_backend_agents(
     token_verifier: TokenVerifier | None = None,
 ) -> dict[str, DomainAgent]:
     async def faq(req: SkillRequest) -> SkillResult:
-        articles = await tools.articles()
+        articles = await tools.articles(str(req.data.get("query") or ""))
+        if not articles:
+            # Nothing in the knowledge base answers it: say so rather than read out unrelated articles.
+            return SkillResult("", [], "public", state=INPUT_REQUIRED)
         return SkillResult(" ".join(a["text"] for a in articles), [f"kb://articles/{a['id']}" for a in articles], "public")
 
     async def holdings(req: SkillRequest) -> SkillResult:
@@ -136,7 +185,15 @@ def build_backend_agents(
                            {"suitable": result["suitable"], "reference": result["reference"]})
 
     async def prepare(req: SkillRequest) -> SkillResult:
-        action = await tools.quote(subject_of(req))
+        positions = _first_input(req, "holdings", "positions") or []
+        resolved = resolve_sale(req.data.get("slots") or {}, positions, "core://positions/mock")
+        if isinstance(resolved, SkillResult):
+            return resolved
+        pos, units = resolved
+        try:
+            action = await tools.quote(subject_of(req), str(pos["instrument_id"]), units)
+        except ToolError as exc:
+            return SkillResult(f"I couldn't prepare that order: {exc}.", [], "internal", state="TASK_STATE_FAILED")
         return SkillResult("Order prepared, not placed.", ["core://quotes/mock"], "client_confidential", {"action": action})
 
     async def execute(req: SkillRequest) -> SkillResult:
@@ -153,7 +210,8 @@ def build_backend_agents(
         if approval_public_key and not verify_approval_token(approval_public_key, token, presented):
             return SkillResult("The approval is not valid for this order.", [], "internal", state="TASK_STATE_REJECTED")
         order = await tools.place_order(subject_of(req), params, str(req.metadata.get("idempotencyKey", "")))
-        return SkillResult(f"Your sell order {order['reference']} has been placed.", [f"core://orders/{order['reference']}"],
+        return SkillResult(f"Your order to sell {order['quantity']} units of the {order['instrument']} has been placed, "
+                           f"reference {order['reference']}.", [f"core://orders/{order['reference']}"],
                            "client_confidential", {"reference": order["reference"], "status": order["status"]})
 
     def agent(name: str, skills: dict[str, SkillHandler], writes: set[str] | None = None) -> DomainAgent:

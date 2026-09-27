@@ -80,8 +80,8 @@ class ConsoleApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_change_flow_with_four_eyes(self):
         service, api = await console()
         ops = [{"target": "intent", "id": "portfolio.overview", "field": "patterns",
-                "value": ["\\b(my )?(portfolio|holdings|positions)\\b", "how (is|are) my (investments|portfolio) doing", "\\bmy investments\\b"]}]
-        status, change = await api.dispatch("POST", "/admin/cc/changes", {}, {"ops": ops, "reason": "customers say my investments"}, hdr("olga", "operator"))
+                "value": ["\\b(my )?(portfolios?|holdings|positions|investments)\\b", "how (is|are) my (investments|portfolios?)( doing)?", "\\bwhat do i (own|hold|have invested)\\b", "\\bmy net worth\\b"]}]
+        status, change = await api.dispatch("POST", "/admin/cc/changes", {}, {"ops": ops, "reason": "customers say my net worth"}, hdr("olga", "operator"))
         self.assertEqual(status, 201)
         self.assertEqual(change["status"], "evaluated")
         cid = change["id"]
@@ -166,8 +166,8 @@ if __name__ == "__main__":
 class PreviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_route_preview_live_and_candidate(self):
         service, api = await console()
-        ops = [{"target": "intent", "id": "portfolio.overview", "field": "patterns", "value": ["\\bmy investments\\b"]}]
-        status, body = await api.dispatch("POST", "/admin/cc/preview", {}, {"text": "How are my investments?", "ops": ops}, hdr("vera", "viewer"))
+        ops = [{"target": "intent", "id": "portfolio.overview", "field": "patterns", "value": ["\\bmy net worth\\b"]}]
+        status, body = await api.dispatch("POST", "/admin/cc/preview", {}, {"text": "What is my net worth?", "ops": ops}, hdr("vera", "viewer"))
         self.assertEqual(status, 200)
         self.assertEqual(body["live"]["source"], "fallback")
         self.assertEqual(body["candidate"]["intent"], "portfolio.overview")

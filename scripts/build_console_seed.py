@@ -33,11 +33,27 @@ CONSOLE = ROOT / "src" / "orchestrator" / "console" / "static" / "console.html"
 START, END = "/*DEMO_SEED_START*/", "/*DEMO_SEED_END*/"
 
 
+# Representative requests for skills that depend on what the user asked (the demo replays one canned answer per skill).
+DEMO_HOLDINGS = {"positions": [{"instrument": "Tech ETF", "units": 400}, {"instrument": "CHF Bond Fund", "units": 900}]}
+SAMPLE_DATA = {
+    "faq.answer": {"query": "What are your opening hours?"},
+    "trade.prepare": {"slots": {"instrument": {"query": "tech ETF"}, "quantity": {"units": 50}},
+                      "inputs": {"holdings": [DEMO_HOLDINGS]}},
+}
+
+
+def demo_evals() -> list[dict]:
+    """Cases the demo can replay: it simulates single turns with canned answers, so conversations and cases that
+    depend on slot filling or knowledge-base search (``console_demo: false``) run only in the real suite."""
+    return [c for c in load_suite(str(ROOT / "config" / "evals.yaml")) if "turns" not in c and c.get("console_demo", True)]
+
+
 async def agent_answers() -> dict[str, dict]:
     answers = {}
     for agent in build_agents().values():
         for skill, handler in agent._skills.items():  # noqa: SLF001 - build-time introspection of the reference agents
-            result = await handler(SkillRequest(skill, "", {}, {"idempotencyKey": "demo0000"}, "demo"))
+            request = SkillRequest(skill, "", SAMPLE_DATA.get(skill, {}), {"idempotencyKey": "demo0000"}, "demo")
+            result = await handler(request)
             answers[skill] = {"text": result.text, "sources": result.sources, "classification": result.classification,
                               "data": result.data, "agent": agent.name}
     return answers
@@ -58,7 +74,7 @@ def build_seed() -> dict:
         "messages": asdict(cfg.messages),
         "alert_rules": [asdict(r) for r in cfg.command_center.alert_rules],
         "change_min_pass_rate": cfg.command_center.change_min_pass_rate,
-        "evals": load_suite(str(ROOT / "config" / "evals.yaml")),
+        "evals": demo_evals(),
         "answers": asyncio.run(agent_answers()),
     }
 

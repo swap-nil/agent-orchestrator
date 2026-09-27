@@ -2,10 +2,14 @@
 # Risk classes: R0 information, R1 personalised read, R2 advice, R3 transaction.
 # Patterns are case-insensitive regular expressions; R2 and R3 are only ever
 # reached through these rules, never through a model classifier.
+# exclude_patterns veto an intent; label names it in "did you mean A or B?"
+# questions; slots are filled from the user's words by fixed rules (see
+# orchestrator/slots.py) and required slots are asked for before any agent runs.
 intents:
   - id: faq.general
     risk: R0
     description: General bank information
+    label: general information about the bank
     required_acr: low
     patterns:
       - "opening hours|branch|fees? for|how do i|what is (a|an|the)"
@@ -14,16 +18,21 @@ intents:
         agent: faq-agent
         skill: faq.answer
         data_classes: [public]
-        instruction: Answer the customer's general question from the approved knowledge base.
+        include_query: true
+        instruction: >-
+          Answer the customer's general question (data.query) from the approved knowledge base only.
+          If no article answers it, reply input-required without text.
 
   - id: portfolio.overview
     risk: R1
     description: Portfolio overview with current prices
+    label: an overview of your portfolio
     required_acr: standard
     quorum: all
     patterns:
-      - "\\b(my )?(portfolio|holdings|positions)\\b"
-      - "how (is|are) my (investments|portfolio) doing"
+      - "\\b(my )?(portfolios?|holdings|positions|investments)\\b"
+      - "how (is|are) my (investments|portfolios?)( doing)?"
+      - "\\bwhat do i (own|hold|have invested)\\b"
     clarification_prompt: Would you like an overview of your whole portfolio or one account?
     steps:
       - id: holdings
@@ -41,10 +50,13 @@ intents:
   - id: advice.rebalance
     risk: R2
     description: Rebalancing suggestion checked for suitability
+    label: a rebalancing suggestion
     required_acr: standard
     patterns:
       - "\\brebalanc(e|ing)\\b"
       - "should i (change|adjust) my (allocation|portfolio)"
+      - "\\bshould i (sell|buy|keep|hold on to|reduce|increase)\\b"
+      - "\\b(is it (wise|a good idea)|do you (think|recommend)|would you recommend)\\b.*\\b(sell|buy|invest)"
     steps:
       - id: holdings
         agent: portfolio-agent
@@ -66,9 +78,24 @@ intents:
   - id: trade.sell
     risk: R3
     description: Sell part of a position
+    label: to sell part of a holding
     required_acr: standard
     patterns:
       - "\\bsell\\b.*\\b(shares?|units?|etf|fund|position|stock)"
+      - "^\\W*((please|ok(ay)?|now|so|i want to|i'd like to|i would like to|can you|could you|go ahead and)\\s+)*sell\\b"
+    # Questions about selling are advice or information, never an order.
+    exclude_patterns:
+      - "^\\W*(should|shall|would|could) (i|we)\\b"
+      - "\\b(is it (wise|a good idea)|do you (think|recommend)|would you recommend|how (do|can|would) i)\\b"
+    slots:
+      - name: instrument
+        kind: instrument
+        required: true
+        prompt: Which of your holdings would you like to sell?
+      - name: quantity
+        kind: quantity
+        required: true
+        prompt: How much of the {instrument} would you like to sell? You can say a number of units, half, or all of it.
     readback_template: >-
       You are about to sell {quantity} units of {instrument} from account {account_mask}
       at market price, estimated {estimated_amount} {currency}.
@@ -82,7 +109,10 @@ intents:
         skill: trade.prepare
         depends_on: [holdings]
         data_classes: [client_confidential]
-        instruction: Prepare (do not place) a sell order and return it as data.action.
+        instruction: >-
+          Prepare (do not place) a sell order for exactly the holding and quantity in data.slots and return it
+          as data.action. If the holding is not held or is ambiguous, or the quantity exceeds the position,
+          reply input-required with a question and data.missing naming the slot to ask for again.
       - id: execute
         agent: trade-agent
         skill: trade.execute

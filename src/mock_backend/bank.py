@@ -18,6 +18,7 @@ import copy
 import hashlib
 import math
 import random
+import re
 import secrets
 import time
 from dataclasses import asdict, dataclass, field
@@ -95,6 +96,17 @@ KNOWLEDGE_BASE: tuple[dict[str, str], ...] = (
      "text": "SEPA transfers in euro are free; other international transfers cost CHF 5 and arrive in one to three days."},
 )
 FEATURED_ARTICLES = ("opening-hours", "contact")
+# Words that say nothing about the topic, so "what is the weather today" matches no article.
+_KB_STOPWORDS = frozenset({
+    "the", "and", "are", "you", "your", "what", "when", "where", "which", "who", "how", "can", "could", "would", "should",
+    "does", "for", "with", "this", "that", "there", "have", "has", "was", "were", "about", "tell", "please", "today",
+    "now", "our", "all", "any", "from", "into", "many", "get", "want", "need", "know", "is", "it", "its",
+    "stop", "yes", "okay", "thanks", "thank", "hello", "bye", "much", "some", "they", "them", "will", "just",
+})
+
+
+def _kb_stem(word: str) -> str:
+    return word[:-1] if len(word) > 3 and word.endswith("s") and not word.endswith("ss") else word
 
 _FIRST = ("Anna", "Luca", "Sara", "Marco", "Lea", "Noah", "Mia", "Elias", "Laura", "Jonas", "Nina", "David")
 _LAST = ("Meier", "Keller", "Brunner", "Rossi", "Weber", "Huber", "Schmid", "Frei", "Baumann", "Graf", "Fischer", "Moser")
@@ -253,8 +265,12 @@ class MockBank:
         pf = self.portfolio(subject)
         if not pf["positions"]:
             raise ValueError("no positions to sell")
-        pos = next((p for p in pf["positions"] if p["instrument_id"] == instrument_id), None) if instrument_id else None
-        pos = pos or pf["positions"][0]
+        if instrument_id:
+            pos = next((p for p in pf["positions"] if p["instrument_id"] == instrument_id), None)
+            if pos is None:
+                raise ValueError("instrument not held")
+        else:
+            pos = pf["positions"][0]
         qty = quantity or max(1, round(pos["units"] * 0.1))
         if qty > pos["units"]:
             raise ValueError("quantity exceeds the position")
@@ -287,8 +303,15 @@ class MockBank:
     # ------------------------------------------------------------------ knowledge base
 
     def articles(self, query: str = "") -> list[dict[str, str]]:
-        words = {w for w in query.lower().split() if len(w) > 2}
-        if not words:
+        """Articles matching the query's meaningful words, best first; only the best-scoring ones are returned."""
+        if not query.strip():
             return [a for a in KNOWLEDGE_BASE if a["id"] in FEATURED_ARTICLES]
-        scored = [(sum(w in (a["title"] + " " + a["text"]).lower() for w in words), a) for a in KNOWLEDGE_BASE]
-        return [a for score, a in sorted(scored, key=lambda s: -s[0]) if score > 0][:3]
+        words = {_kb_stem(w) for w in re.findall(r"[a-z0-9-]+", query.lower()) if len(w) > 2 and w not in _KB_STOPWORDS}
+        if not words:
+            return []
+        scored = []
+        for a in KNOWLEDGE_BASE:
+            vocabulary = {_kb_stem(w) for w in re.findall(r"[a-z0-9-]+", (a["title"] + " " + a["text"]).lower())}
+            scored.append((len(words & vocabulary), a))
+        best = max(score for score, _ in scored)
+        return [a for score, a in scored if score == best and score > 0][:2]

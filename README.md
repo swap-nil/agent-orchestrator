@@ -5,7 +5,7 @@ Python implementation of the enterprise multi-agent orchestrator described in th
 ## Start here
 
 ```bash
-make test                 # 155 unit tests, no network needed
+make test                 # 209 unit tests, no network needed
 make console              # command center + whole stack in one process: http://127.0.0.1:8765/console
 make evals                # golden eval suite, the same gate that guards runtime changes
 make compose-up           # full local stack (Redis, PostgreSQL, Temporal, OPA, OTel, LiveKit, demo agents)

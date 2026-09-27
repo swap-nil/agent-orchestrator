@@ -67,6 +67,10 @@ class SessionState:
     token_blob: str = ""
     token_expires_at: float = 0.0
     clarification_rounds: int = 0
+    # An open question the next turn may answer: {"kind": "slot", "intent", "slots", "asking"}
+    # or {"kind": "choice", "candidates", "text"}. Cleared when answered or when the user moves on.
+    pending: dict[str, Any] = field(default_factory=dict)
+    last_clarified_text: str = ""
     cost_used: int = 0
     turns: int = 0
     pending_workflows: list[str] = field(default_factory=list)

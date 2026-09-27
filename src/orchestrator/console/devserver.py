@@ -138,7 +138,7 @@ class Chaos:
 
 UTTERANCES: list[tuple[float, str]] = [
     (14, "What are your opening hours?"), (5, "Where is the nearest branch?"), (4, "What are the fees for a card replacement?"),
-    (16, "How is my portfolio doing?"), (8, "Show me my holdings"), (4, "How are my investments?"),
+    (16, "How is my portfolio doing?"), (8, "Show me my holdings"), (4, "What is my net worth?"), (3, "How many portfolios do I have?"),
     (7, "Should I rebalance?"), (3, "Should I change my allocation?"),
     (6, "Sell 50 units of my tech ETF"), (2, "please sell 10 shares of Nestle"),
     (3, "sell my position in my holdings"), (3, "hmm, not sure"),

@@ -191,7 +191,11 @@ class BackendAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(allowed["state"], "TASK_STATE_COMPLETED")
 
     async def test_execute_rejects_tampered_or_unsigned_actions(self):
-        action = (await self.call("trade-agent", "trade.prepare"))["data"]["action"]
+        positions = (await self.call("portfolio-agent", "portfolio.holdings"))["data"]["positions"]
+        slots = {"instrument": {"query": positions[0]["instrument"]}, "quantity": {"units": 2}}
+        inputs = {"holdings": [{"positions": positions}]}
+        prepared = await self.call("trade-agent", "trade.prepare", {"slots": slots, "inputs": inputs})
+        action = prepared["data"]["action"]
         full = {"intent": "trade.sell", "session_id": "s-1", "tenant": "t", "params": action}
         a_hash = action_hash(full)
         signer = ApprovalSigner(APPROVAL_KEY.encode())
@@ -228,9 +232,11 @@ class BackendAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"CHF {pf['total_value_chf']:,}", overview.text)
         advice = await service.handle_turn(TurnRequest("s-1", "t2", "Should I rebalance?"))
         self.assertEqual(advice.type, ResponseType.ANSWER, advice.reasons)
-        tx = await service.handle_turn(TurnRequest("s-1", "t3", "Sell some units of my ETF"))
+        target = pf["positions"][-1]
+        tx = await service.handle_turn(TurnRequest("s-1", "t3", f"Sell 2 units of my {target['instrument']}"))
         self.assertEqual(tx.type, ResponseType.APPROVAL_REQUIRED, tx.reasons)
         params = tx.approval["action"]["params"]
+        self.assertEqual((params["instrument_id"], params["quantity"]), (target["instrument_id"], 2))  # exactly what was asked
         self.assertIn(f"sell {params['quantity']} units of {params['instrument']}", tx.text)
         a = tx.approval
         await service.decide_approval(a["approval_id"], approve=True, subject="u-1", acr="stepup",

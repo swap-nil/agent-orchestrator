@@ -41,6 +41,8 @@ class ExecutionContext:
     locale: str = "en-CH"
     approval_token: str | None = None
     extra_data: dict[str, Any] = field(default_factory=dict)
+    # PII-redacted user text, sent only to steps with include_query (public R0 steps).
+    query: str = ""
 
 
 @dataclass
@@ -173,6 +175,8 @@ class Executor:
             if step.mode is StepMode.WRITE and ctx.approval_token:
                 metadata["approvalToken"] = ctx.approval_token
             data = {"skill": step.skill, "inputs": inputs, "locale": ctx.locale, **ctx.extra_data}
+            if step.include_query and ctx.query:
+                data["query"] = ctx.query
             try:
                 with span(f"invoke_agent {agent.name}", child, **{
                     "gen_ai.operation.name": "invoke_agent",

@@ -187,8 +187,15 @@ $("#start").onclick = async () => {
     room.registerTextStreamHandler("lk.transcription", async (reader, from) => {
       const text = (await reader.readAll()).trim();
       if (text) say(from.identity === room.localParticipant.identity ? "You" : "Assistant", text, from.identity === room.localParticipant.identity ? "" : "agent");
+      }
     });
     room.registerRpcMethod("orchestrator.approval_request", async (data) => { showApproval(JSON.parse(data.payload)); return JSON.stringify({shown: true}); });
+    // The user said "cancel" to the assistant: decline the open confirmation through our backend, as if they pressed Decline.
+    room.registerRpcMethod("orchestrator.approval_cancel", async (data) => {
+      const {approval_id} = JSON.parse(data.payload);
+      if (!pending || pending.approval_id !== approval_id || !$("#approval").open || $("#declineBtn").hidden) return JSON.stringify({declined: false});
+      return JSON.stringify({declined: await decide(false)});
+    });
     await room.connect(s.url, s.token);
     await room.startAudio();
     if (channel === "voice") await room.localParticipant.setMicrophoneEnabled(true);
@@ -233,7 +240,8 @@ async function decide(approve) {
     else { r.className = "err"; r.textContent = "Not accepted: " + ((body.reasons || []).join(", ") || body.error || body.detail || "HTTP " + res.status); }
     $("#approveBtn").hidden = $("#declineBtn").hidden = true; $("#closeBtn").hidden = false;
     setTimeout(loadBank, 4000);
-  } catch (e) { $("#approvalResult").className = "err"; $("#approvalResult").textContent = e.message; }
+    return !approve && res.ok && !!body.declined;
+  } catch (e) { $("#approvalResult").className = "err"; $("#approvalResult").textContent = e.message; return false; }
   finally { $("#approveBtn").disabled = $("#declineBtn").disabled = false; }
 }
 $("#approveBtn").onclick = () => decide(true);

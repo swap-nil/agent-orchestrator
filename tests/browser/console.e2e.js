@@ -39,14 +39,14 @@ const base = process.argv[2], tag = process.argv[3], SP = process.argv[4];
   await page.fill('#mReason', 'INC-4471 market data vendor outage'); await page.click('#mOk'); await page.waitForTimeout(1200);
   const ks = await page.evaluate(() => STATE.overview.kill_switch.disabled_agents);
   console.log(tag, 'kill switch now:', JSON.stringify(ks));
-  // skill studio: fix investments routing
+  // skill studio: fix net worth routing
   await page.click('[data-view=studio]'); await page.waitForTimeout(1200);
   await page.click('[data-sel="portfolio.overview"]'); await page.waitForTimeout(400);
   const ta = await page.$('textarea[data-k="intent|portfolio.overview|patterns"]');
-  await ta.click(); await page.keyboard.press('Control+End'); await page.keyboard.type('\n\\bmy investments\\b');
+  await ta.click(); await page.keyboard.press('Control+End'); await page.keyboard.type('\n\\bmy net worth\\b');
   await page.click('#tryBtn'); await page.waitForTimeout(700);
   console.log(tag, 'try:', (await page.textContent('#tryOut')).replace(/\s+/g, ' ').trim());
-  await page.fill('#chTitle', 'Recognise "my investments"'); await page.fill('#chReason', 'Customers say "my investments"; they reach the FAQ today');
+  await page.fill('#chTitle', 'Recognise "my net worth"'); await page.fill('#chReason', 'Customers say "my net worth"; they reach the FAQ today');
   await page.click('#proposeBtn'); await page.waitForSelector('#changeCard .gate', { timeout: 8000 });
   console.log(tag, 'gate:', (await page.textContent('#changeCard .gate')).replace(/\s+/g, ' ').trim());
   console.log(tag, 'approve disabled for proposer:', await page.$eval('#cApprove', b => b.disabled + ' / ' + b.title));

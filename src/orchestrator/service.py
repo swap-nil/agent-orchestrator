@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import string
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .admission import AdmissionController, Rejected
@@ -27,13 +28,14 @@ from .audit import AuditLog
 from .catalogue import Catalogue
 from .config import KillSwitchConfig, OrchestratorConfig
 from .executor import ExecutionContext, Executor
-from .guards import InputGuard, OutputGuard
+from .guards import InputGuard, OutputGuard, redact_pii
 from .models import (
-    Plan, ResponseType, RiskClass, StepMode, StepResult, StepSpec, TaskState, TurnRequest, TurnResponse, UserContext,
+    Intent, Plan, ResponseType, RiskClass, StepMode, StepResult, StepSpec, TaskState, TurnRequest, TurnResponse, UserContext,
 )
 from .planner import Planner, build_layers
 from .policy import PolicyDecision, PolicyEnforcementPoint, build_policy_input
-from .router import Router
+from .router import Router, RoutingDecision
+from .slots import describe, extract_slots, instrument_matches, missing_required, tokens
 from .state import SessionState, SessionStore, StateError, TokenCipher
 from .tracing import TraceContext, continue_or_start, span
 
@@ -51,6 +53,62 @@ def render_readback(template: str, params: dict[str, Any]) -> str:
     if any(("." in f or "[" in f) for f in fields):
         raise ValueError("read-back templates may only use plain field names")
     return template.format_map(_SafeDict({k: v for k, v in params.items() if isinstance(v, (str, int, float))}))
+
+
+CANCEL_PHRASES = frozenset({
+    "cancel", "cancel that", "cancel it", "never mind", "nevermind", "forget it", "forget about it", "no", "no thanks",
+    "no thank you", "stop", "don't", "do not", "abort",
+})
+_YES = frozenset({"yes", "yes please", "yeah", "yep", "sure", "ok", "okay", "correct", "right", "that one", "exactly"})
+_ORDINALS = (
+    (frozenset({"first", "the first", "the first one", "first one", "one", "1", "option 1", "option one", "the former",
+                "former"}), 0),
+    (frozenset({"second", "the second", "the second one", "second one", "two", "2", "option 2", "option two", "the latter",
+                "latter"}), 1),
+    (frozenset({"third", "the third", "the third one", "third one", "three", "3", "option 3", "option three"}), 2),
+)
+_LABEL_NOISE = frozenset({"a", "an", "to", "your", "you", "of", "part", "about", "i", "want", "like", "would", "please", "the"})
+# Which response type leads a merged (compound) answer.
+_MERGE_PRIORITY = (ResponseType.APPROVAL_REQUIRED, ResponseType.CLARIFY, ResponseType.ANSWER, ResponseType.REFUSED,
+                   ResponseType.HANDOVER, ResponseType.BUSY)
+
+
+def _normalise(text: str) -> str:
+    return " ".join(re.sub(r"[^\w\s']", " ", text.lower()).split())
+
+
+def _join_or(options: list[str]) -> str:
+    return options[0] if len(options) == 1 else ", ".join(options[:-1]) + " or " + options[-1]
+
+
+def action_mismatch(intent: Intent, slots: dict[str, Any], params: dict[str, Any]) -> list[str]:
+    """Differences between what the user asked for (slots) and the action an agent prepared."""
+    problems: list[str] = []
+    for spec in intent.slots:
+        value = slots.get(spec.name)
+        if not isinstance(value, dict):
+            continue
+        if spec.kind == "instrument":
+            name, iid = str(params.get("instrument", "")), str(params.get("instrument_id", ""))
+            if not instrument_matches(str(value.get("query", "")), name, iid):
+                problems.append(f"instrument {name or iid or '?'} does not match {value.get('query')!r}")
+        elif spec.kind == "quantity":
+            qty = params.get("quantity")
+            if not isinstance(qty, int) or isinstance(qty, bool) or qty <= 0:
+                problems.append("no positive quantity")
+            elif "units" in value and qty != value["units"]:
+                problems.append(f"quantity {qty} differs from the {value['units']} units asked for")
+    return problems
+
+
+@dataclass
+class _Work:
+    """One intent to serve this turn, with slots carried over from a follow-up question."""
+
+    intent: Intent
+    text: str
+    slots: dict[str, Any] = field(default_factory=dict)
+    asking: str = ""
 
 
 @dataclass
@@ -296,17 +354,155 @@ class OrchestratorService:
             text = m.transactions_unavailable if routing.intent.risk is RiskClass.R3 else m.refused
             return self._response(ResponseType.REFUSED, text, req, trace, intent=routing.intent.id, reasons=["intent_disabled"], meta={"risk": risk})
 
-        if routing.needs_clarification or routing.intent is None:
-            state.clarification_rounds += 1
+        # An open question from the previous turn is answered now or dropped: never carried further.
+        pending, state.pending = state.pending, {}
+        if pending and _normalise(verdict.text) in CANCEL_PHRASES:
+            await audit.record(req.session_id, "pending_cancelled", {"kind": pending.get("kind")}, **ids)
+            state.clarification_rounds = 0
             await self.c.store.put(state)
-            if state.clarification_rounds > self.cfg.routing.max_clarification_rounds:
-                state.clarification_rounds = 0
-                await self.c.store.put(state)
-                return self._response(ResponseType.HANDOVER, m.handover, req, trace, reasons=["clarification_limit"])
-            prompt = routing.intent.clarification_prompt if routing.intent and routing.intent.clarification_prompt else m.clarify_default
-            return self._response(ResponseType.CLARIFY, prompt, req, trace, intent=routing.intent.id if routing.intent else None, meta={"risk": risk})
-        state.clarification_rounds = 0
-        intent = routing.intent
+            return self._response(ResponseType.ANSWER, m.cancelled, req, trace, reasons=["cancelled"])
+
+        work: list[_Work] = []
+        follow = self._follow_up(pending, routing, verdict.text, kill) if pending else None
+        if follow is not None:
+            await audit.record(req.session_id, "follow_up", {"kind": pending.get("kind"), "intent": follow.intent.id,
+                                                             "asking": follow.asking}, **ids)
+            work = [follow]
+        elif routing.segments:
+            work = [_Work(intent, segment) for segment, intent in routing.segments]
+        elif routing.needs_clarification or routing.intent is None:
+            response = self._clarify(req, trace, state, routing, verdict.text)
+            await self.c.store.put(state)
+            return response
+        else:
+            work = [_Work(routing.intent, verdict.text)]
+        if follow is None or follow.asking == "":
+            state.clarification_rounds = 0
+        state.last_clarified_text = ""
+
+        responses = [await self._serve(req, trace, state, user, kill, item) for item in work]
+        await self.c.store.put(state)
+        return responses[0] if len(responses) == 1 else self._merge(req, trace, responses)
+
+    # ------------------------------------------------------------------ follow-ups and clarification
+
+    def _follow_up(self, pending: dict[str, Any], routing: RoutingDecision, text: str, kill: KillSwitchConfig) -> _Work | None:
+        """Does this turn answer the previous turn's question? None when the user moved on to something else."""
+        moved_on = bool(routing.segments) or (
+            routing.source == "rules" and not routing.needs_clarification and routing.intent is not None
+        )
+        if pending.get("kind") == "slot":
+            intent = self.c.catalogue.intent(str(pending.get("intent", "")))
+            if intent is None or intent.id in kill.disabled_intents:
+                return None
+            if moved_on and (routing.segments or (routing.intent is not None and routing.intent.id != intent.id)):
+                return None
+            return _Work(intent, text, dict(pending.get("slots") or {}), str(pending.get("asking", "")))
+        if pending.get("kind") == "choice":
+            candidates = [self.c.catalogue.intents[c] for c in pending.get("candidates") or []
+                          if c in self.c.catalogue.intents and c not in kill.disabled_intents]
+            original = str(pending.get("text", ""))
+            if _normalise(text) == _normalise(original):
+                return None  # the same request again is not a choice; ask again, more clearly
+            chosen = self._choose(candidates, text)
+            if chosen is None:
+                return None
+            slots = extract_slots(chosen.slots, original) if chosen.slots else {}
+            return _Work(chosen, original, slots)
+        return None
+
+    def _choose(self, candidates: list[Intent], text: str) -> Intent | None:
+        """Pick one of the offered options from a reply like "the second", "sell" or "the overview"."""
+        if not candidates:
+            return None
+        said = _normalise(text)
+        for words, index in _ORDINALS:
+            if said in words and index < len(candidates):
+                return candidates[index]
+        if len(candidates) == 1 and said in _YES:
+            return candidates[0]
+        scores = {k: v for k, v in self.c.router.rule_scores(text).items() if k in {c.id for c in candidates}}
+        if scores:
+            best = max(scores.values())
+            top = [k for k, v in scores.items() if v == best]
+            if len(top) == 1:
+                return self.c.catalogue.intents[top[0]]
+        reply = set(tokens(text)) - _LABEL_NOISE
+        overlap = {c.id: len(reply & (set(tokens(c.label or c.description)) - _LABEL_NOISE)) for c in candidates}
+        best = max(overlap.values())
+        top = [k for k, v in overlap.items() if v == best]
+        return self.c.catalogue.intents[top[0]] if best > 0 and len(top) == 1 else None
+
+    def _clarify(self, req: TurnRequest, trace: TraceContext, state: SessionState, routing: RoutingDecision,
+                 text: str) -> TurnResponse:
+        m = self.cfg.messages
+        risk = routing.intent.risk.value if routing.intent else None
+        state.clarification_rounds += 1
+        repeated = bool(state.last_clarified_text) and _normalise(text) == state.last_clarified_text
+        state.last_clarified_text = _normalise(text)
+        if state.clarification_rounds > self.cfg.routing.max_clarification_rounds:
+            state.clarification_rounds = 0
+            state.last_clarified_text = ""
+            return self._response(ResponseType.HANDOVER, m.handover, req, trace, reasons=["clarification_limit"])
+        candidates = [self.c.catalogue.intents[c] for c in routing.candidates if c in self.c.catalogue.intents][:3]
+        if len(candidates) >= 2:
+            # Name the options instead of a generic "tell me more", and remember them for the answer.
+            state.pending = {"kind": "choice", "candidates": [c.id for c in candidates], "text": text}
+            prompt = m.clarify_choice.format(options=_join_or([c.label or c.description.lower() for c in candidates]))
+        elif routing.intent is not None and routing.intent.clarification_prompt:
+            prompt = routing.intent.clarification_prompt
+        elif routing.source == "none":
+            prompt = m.out_of_scope
+        else:
+            prompt = m.clarify_default
+        if repeated:
+            prompt = f"{m.clarify_repeat_prefix} {prompt}"
+        return self._response(ResponseType.CLARIFY, prompt, req, trace, intent=routing.intent.id if routing.intent else None,
+                              reasons=["clarify"], meta={"risk": risk, "candidates": [c.id for c in candidates]})
+
+    def _merge(self, req: TurnRequest, trace: TraceContext, responses: list[TurnResponse]) -> TurnResponse:
+        """One answer for a compound request: every part's text, the most demanding type."""
+        lead = min(responses, key=lambda r: _MERGE_PRIORITY.index(r.type))
+        texts: list[str] = []
+        for r in responses:
+            if r.text and r.text not in texts:
+                texts.append(r.text)
+        sources = list(dict.fromkeys(s for r in responses for s in r.sources))
+        approval = next((r.approval for r in responses if r.approval), None)
+        return TurnResponse(
+            type=lead.type, text=" ".join(texts), session_id=req.session_id, turn_id=req.turn_id, trace_id=trace.trace_id,
+            intent=lead.intent, sources=sources, approval=approval, partial=any(r.partial for r in responses),
+            reasons=[x for r in responses for x in r.reasons],
+            meta={**lead.meta, "segments": [r.intent for r in responses]},
+        )
+
+    # ------------------------------------------------------------------ serving one intent
+
+    async def _serve(self, req: TurnRequest, trace: TraceContext, state: SessionState, user: UserContext,
+                     kill: KillSwitchConfig, work: _Work) -> TurnResponse:
+        m = self.cfg.messages
+        audit = self.c.audit
+        intent = work.intent
+        ids = {"session_id": req.session_id, "turn_id": req.turn_id, "trace_id": trace.trace_id}
+        slots: dict[str, Any] = {}
+        if intent.slots:
+            slots = {**work.slots, **extract_slots(intent.slots, work.text, asking=work.asking)}
+            missing = missing_required(intent.slots, slots)
+            if missing is not None:
+                if work.asking == missing.name:
+                    # Asked for this already and did not get it.
+                    state.clarification_rounds += 1
+                    if state.clarification_rounds > self.cfg.routing.max_clarification_rounds:
+                        state.clarification_rounds = 0
+                        return self._response(ResponseType.HANDOVER, m.handover, req, trace, intent=intent.id,
+                                              reasons=["clarification_limit"], meta={"risk": intent.risk.value})
+                state.pending = {"kind": "slot", "intent": intent.id, "slots": slots, "asking": missing.name}
+                await self.c.audit.record(req.session_id, "slot_requested", {
+                    "intent": intent.id, "slot": missing.name, "filled": sorted(slots),
+                }, **ids)
+                return self._response(ResponseType.CLARIFY, render_readback(missing.prompt, describe(slots)), req, trace,
+                                      intent=intent.id, reasons=["slot_missing"], meta={"risk": intent.risk.value})
+            await self.c.audit.record(req.session_id, "slots_filled", {"intent": intent.id, "slots": slots}, **ids)
 
         priority = intent.risk is RiskClass.R3
         with self.c.admission.admit(priority=priority) as adm:
@@ -348,10 +544,11 @@ class OrchestratorService:
                 await self.c.store.put(state)
                 return self._response(ResponseType.REFUSED, m.refused, req, trace, intent=intent.id, reasons=decision.reasons, meta=meta)
 
+            query = redact_pii(work.text)[0] if any(st.include_query for st in plan.steps) else ""
             if plan.write_steps:
-                response = await self._prepare_transaction(req, trace, state, user, plan, kill)
+                response = await self._prepare_transaction(req, trace, state, user, plan, kill, slots)
             else:
-                response = await self._execute_reads(req, trace, state, user, plan, kill)
+                response = await self._execute_reads(req, trace, state, user, plan, kill, slots, query)
             skipped = [st.id for st in intent.steps if st.id not in kept]
             if skipped and response.type is ResponseType.ANSWER and not response.partial:
                 response.partial = True
@@ -382,12 +579,14 @@ class OrchestratorService:
 
     async def _run(
         self, plan: Plan, state: SessionState, user: UserContext, kill: KillSwitchConfig, req: TurnRequest, trace: TraceContext,
+        slots: dict[str, Any] | None = None, query: str = "",
     ):  # type: ignore[no-untyped-def]
         loop = asyncio.get_running_loop()
         ctx = ExecutionContext(
             session_id=state.session_id, turn_id=req.turn_id, tenant=state.tenant,
             subject_token=self._subject_token(state), trace=trace,
             deadline=loop.time() + self.cfg.budgets.turn_deadline_ms / 1000, locale=state.locale,
+            extra_data={"slots": slots} if slots else {}, query=query,
         )
 
         async def policy_check(step: StepSpec) -> PolicyDecision:
@@ -407,12 +606,30 @@ class OrchestratorService:
         state.cost_used += plan.cost_units
         return outcome
 
+    def _agent_question(self, result: StepResult, risk: RiskClass) -> tuple[str, str, list[str]]:
+        """Text, missing slot and sources of an agent's input-required reply; the text only if it may be spoken."""
+        allowed = set(self.cfg.guards.response_allowed_classifications)
+        missing = next((str(a.data["missing"]) for a in result.artifacts if a.data.get("missing")), "")
+        for artifact in result.artifacts:
+            if artifact.text and artifact.classification in allowed:
+                out = self.c.output_guard.check(artifact.text, risk, artifact.sources)
+                if out.allowed:
+                    return out.text, missing, artifact.sources
+        return "", missing, []
+
     async def _execute_reads(
         self, req: TurnRequest, trace: TraceContext, state: SessionState, user: UserContext, plan: Plan, kill: KillSwitchConfig,
+        slots: dict[str, Any] | None = None, query: str = "",
     ) -> TurnResponse:
         m = self.cfg.messages
         intent = plan.intent
-        outcome = await self._run(plan, state, user, kill, req, trace)
+        outcome = await self._run(plan, state, user, kill, req, trace, slots, query)
+        asked = next((r for r in outcome.results.values() if r.state is TaskState.INPUT_REQUIRED), None)
+        if asked is not None:
+            # The agent could not answer (e.g. nothing in the knowledge base): its question, or what we can do.
+            text, _, sources = self._agent_question(asked, intent.risk)
+            return self._response(ResponseType.CLARIFY, text or m.out_of_scope, req, trace, intent=intent.id,
+                                  sources=sources, reasons=["input_required" if text else "out_of_scope"])
         if not outcome.success:
             denied = any(r.state is TaskState.REJECTED for r in outcome.results.values())
             if denied:
@@ -440,6 +657,7 @@ class OrchestratorService:
 
     async def _prepare_transaction(
         self, req: TurnRequest, trace: TraceContext, state: SessionState, user: UserContext, plan: Plan, kill: KillSwitchConfig,
+        slots: dict[str, Any] | None = None,
     ) -> TurnResponse:
         m = self.cfg.messages
         intent = plan.intent
@@ -455,8 +673,20 @@ class OrchestratorService:
         read_plan = Plan(intent=intent, steps=read_steps, layers=build_layers(read_steps)) if read_steps else None
 
         params: dict[str, Any] = {}
+        slots = slots or {}
         if read_plan is not None:
-            outcome = await self._run(read_plan, state, user, kill, req, trace)
+            outcome = await self._run(read_plan, state, user, kill, req, trace, slots)
+            asked = next((r for r in outcome.results.values() if r.state is TaskState.INPUT_REQUIRED), None)
+            if asked is not None:
+                # E.g. the holding is not in the portfolio or is ambiguous: ask again for that slot only.
+                text, missing, sources = self._agent_question(asked, intent.risk)
+                spec = next((sp for sp in intent.slots if sp.name == missing), None)
+                if spec is not None:
+                    state.pending = {"kind": "slot", "intent": intent.id, "asking": spec.name,
+                                     "slots": {k: v for k, v in slots.items() if k != spec.name}}
+                prompt = text or (render_readback(spec.prompt, describe(slots)) if spec else m.clarify_default)
+                return self._response(ResponseType.CLARIFY, prompt, req, trace, intent=intent.id, sources=sources,
+                                      reasons=["input_required"])
             if not outcome.success:
                 return self._response(ResponseType.HANDOVER, m.handover, req, trace, intent=intent.id, reasons=["prepare_failed"])
             for w in write_steps:
@@ -467,6 +697,12 @@ class OrchestratorService:
                             params.update(action_part)
         if not params:
             return self._response(ResponseType.HANDOVER, m.handover, req, trace, intent=intent.id, reasons=["no_action_prepared"])
+        mismatch = action_mismatch(intent, slots, params)
+        if mismatch:
+            # Defence in depth: never ask the user to approve an order they did not ask for.
+            await self.c.audit.record(state.session_id, "action_mismatch", {"intent": intent.id, "problems": mismatch},
+                                      session_id=state.session_id, turn_id=req.turn_id, trace_id=trace.trace_id)
+            return self._response(ResponseType.REFUSED, m.action_mismatch, req, trace, intent=intent.id, reasons=["action_mismatch"])
 
         action = {"intent": intent.id, "session_id": state.session_id, "tenant": state.tenant, "params": params}
         workflow_id = f"txn-{state.session_id}-{req.turn_id}"

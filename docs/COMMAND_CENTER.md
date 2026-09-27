@@ -77,11 +77,27 @@ The golden dataset is `config/evals.yaml` (`command_center.evals_file`), with si
 | `pii` | text → kinds redacted, strings that must not survive, no false positives with `exact: true` |
 | `output_guard` | answer text, risk class and grounding → allowed or not |
 | `policy` | intent, step, authentication level, environment, channel, phase, approval, kill switch → allow or a specific deny reason |
-| `e2e` | a whole turn through an isolated orchestrator with the reference agents → outcome, intent, required and forbidden phrases, sources |
+| `e2e` | a whole turn, or with `turns` a whole conversation, through an isolated orchestrator with the reference agents → outcome, intent, required and forbidden phrases, sources |
 
 Run them from the Evals view, or in CI with `make evals` (`python -m orchestrator.cli run-evals`, non-zero exit below the gate). The suite runs in about 30 ms, which is why it can gate every change. End-to-end cases use the reference agents, so they test orchestration behaviour, not your production agents' answers; add live-agent evals in your integration environment.
 
-Treat the dataset as the platform's memory. Every complaint, incident or near miss becomes a case. While building this, the suite itself had a gap: broadening the trade pattern to `\bsell\b` passed every case until `rt-no-trade-sell-word` ("How do I sell my old car to a dealer?") was added. The repository ships with one known failing case, `rt-pf-investments` ("How are my investments?"), so the first improvement in the skill studio has something real to fix.
+Treat the dataset as the platform's memory. Every complaint, incident or near miss becomes a case. While building this, the suite itself had a gap: broadening the trade pattern to `\bsell\b` passed every case until `rt-no-trade-sell-word` ("How do I sell my old car to a dealer?") was added; since the trade intent gained exclusion patterns for questions, `rt-no-trade-branch-news` ("Is the bank going to sell the branch in Bern?") is the case that catches it. The repository ships with one known failing case, `rt-pf-networth` ("What is my net worth?"), so the first improvement in the skill studio has something real to fix. The `cv-*` cases replay real conversations turn by turn; see section 6.1.
+
+### 6.1 Conversations
+
+An `e2e` case with `turns` replays a conversation in one session and checks every turn, so follow-up questions, slot filling and cancellations are tested the way users meet them:
+
+```yaml
+- id: cv-slot-filling
+  kind: e2e
+  expect_type: approval_required
+  turns:
+    - {text: "I want to sell", expect_type: clarify, must_contain: ["Which of your holdings"]}
+    - {text: "the tech ETF", expect_type: clarify, must_contain: ["How much of the tech ETF"]}
+    - {text: "all of it", expect_type: approval_required, must_contain: ["400 units of Tech ETF"]}
+```
+
+`cv-transcript` replays the conversation that sold the wrong instrument and answered "Stop" and a weather question with branch opening hours. Routing cases for a compound request expect the intents joined with `+` in execution order (`portfolio.overview+trade.sell`). `tests/test_conversation_regressions.py` covers the same ground against the fake core bank and the backend agents, and the master agent's control commands against a fake LiveKit session.
 
 ## 7. Improving behaviour at runtime
 

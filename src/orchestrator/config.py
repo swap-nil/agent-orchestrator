@@ -330,6 +330,19 @@ class MessagesConfig:
     busy: str = "We're very busy right now. Please try again in a moment, or I can arrange a call back."
     handover: str = "Let me connect you with one of our advisors who can help further."
     clarify_default: str = "Could you tell me a bit more about what you'd like to do?"
+    # {options} lists the matching intents' labels: "an overview of your portfolio or to sell part of a holding".
+    clarify_choice: str = "Just to be sure: would you like {options}?"
+    clarify_repeat_prefix: str = "Sorry, I still need to know which you mean."
+    out_of_scope: str = (
+        "I'm sorry, I can't help with that. I can tell you how your portfolio is doing, answer general questions "
+        "about the bank, suggest a rebalancing, or sell a holding for you."
+    )
+    cancelled: str = "Okay, I've cancelled that."
+    # The prepared order did not match what the user asked for; nothing was sent for approval.
+    action_mismatch: str = (
+        "I couldn't prepare exactly the order you asked for, so I haven't done anything. "
+        "An advisor can help you with it."
+    )
     failure: str = "I couldn't complete that just now. Please try again shortly."
     partial_suffix: str = "Some information is temporarily unavailable."
     transactions_unavailable: str = "I can't carry out transactions at the moment. An advisor can help you."

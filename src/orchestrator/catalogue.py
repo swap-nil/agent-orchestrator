@@ -8,6 +8,7 @@ agents registered for writes, and step dependencies must form a DAG.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ import yaml
 
 from .config import ConfigError
 from .models import AgentRecord, Intent, RiskClass, StepMode, StepSpec
+from .slots import SLOT_KINDS, SlotSpec
 
 
 @dataclass
@@ -82,10 +84,37 @@ def _parse_step(raw: dict[str, Any], where: str, agents: dict[str, AgentRecord])
             data_classes=tuple(str(c) for c in raw.get("data_classes") or ("internal",)),
             cost_units=int(raw.get("cost_units", agents[agent_name].cost_units if agent_name in agents else 1)),
             instruction=str(raw.get("instruction", "")),
+            include_query=bool(raw.get("include_query", False)),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigError(f"{where}: invalid step ({exc})") from exc
     return step
+
+
+def _parse_slots(raw: Any, where: str) -> tuple[SlotSpec, ...]:
+    slots: list[SlotSpec] = []
+    for j, item in enumerate(raw or []):
+        try:
+            spec = SlotSpec(name=str(item["name"]), kind=str(item["kind"]), required=bool(item.get("required", False)),
+                            prompt=str(item.get("prompt", "")))
+        except (KeyError, TypeError) as exc:
+            raise ConfigError(f"{where}.slots[{j}]: invalid slot ({exc})") from exc
+        if spec.kind not in SLOT_KINDS:
+            raise ConfigError(f"{where}.slots[{j}]: kind must be one of {list(SLOT_KINDS)}")
+        if spec.required and not spec.prompt:
+            raise ConfigError(f"{where}.slots[{j}]: required slot {spec.name!r} needs a prompt")
+        if spec.name in {s.name for s in slots}:
+            raise ConfigError(f"{where}.slots[{j}]: duplicate slot {spec.name!r}")
+        slots.append(spec)
+    return tuple(slots)
+
+
+def _check_patterns(where: str, patterns: tuple[str, ...]) -> None:
+    for p in patterns:
+        try:
+            re.compile(p)
+        except re.error as exc:
+            raise ConfigError(f"{where}: invalid pattern {p!r} ({exc})") from exc
 
 
 def _check_dag(intent_id: str, steps: list[StepSpec]) -> None:
@@ -141,6 +170,9 @@ def parse_intents(data: dict[str, Any], agents: dict[str, AgentRecord], acr_leve
                 raise ConfigError(f"{where}: agent {s.agent!r} does not declare skill {s.skill!r}")
             if s.mode is StepMode.WRITE and not agent.writes_allowed:
                 raise ConfigError(f"{where}: agent {s.agent!r} is not registered for write steps")
+            if s.include_query and (risk is not RiskClass.R0 or set(s.data_classes) - {"public"}):
+                # The user's words only ever go to public information steps.
+                raise ConfigError(f"{where}: step {s.id!r} may only use include_query in an R0 intent with public data")
         has_writes = any(s.mode is StepMode.WRITE for s in steps)
         if has_writes and risk is not RiskClass.R3:
             raise ConfigError(f"{where}: intent {intent_id!r} has write steps and must be risk R3")
@@ -157,6 +189,8 @@ def parse_intents(data: dict[str, Any], agents: dict[str, AgentRecord], acr_leve
             raise ConfigError(f"{where}: quorum must be all, majority or any")
         if risk is RiskClass.R3 and not raw.get("readback_template"):
             raise ConfigError(f"{where}: R3 intent {intent_id!r} needs a readback_template")
+        exclude = tuple(str(p) for p in raw.get("exclude_patterns") or ())
+        _check_patterns(where, patterns + exclude)
         intents[intent_id] = Intent(
             id=intent_id,
             risk=risk,
@@ -167,6 +201,9 @@ def parse_intents(data: dict[str, Any], agents: dict[str, AgentRecord], acr_leve
             quorum=quorum,
             clarification_prompt=str(raw.get("clarification_prompt", "")),
             readback_template=str(raw.get("readback_template", "")),
+            label=str(raw.get("label", "")),
+            exclude_patterns=exclude,
+            slots=_parse_slots(raw.get("slots"), where),
         )
     if not intents:
         raise ConfigError("intent catalogue is empty")

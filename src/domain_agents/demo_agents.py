@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import re
+
+from .backend_agents import INPUT_REQUIRED, resolve_sale
 from .kit import DomainAgent, SkillRequest, SkillResult
+
+PRICES = {"Tech ETF": 124.0, "CHF Bond Fund": 60.0}
 
 
 async def faq(req: SkillRequest) -> SkillResult:
+    query = str(req.data.get("query") or "")
+    if query and not re.search(r"hour|open|branch|close", query, re.IGNORECASE):
+        return SkillResult("", [], "public", state=INPUT_REQUIRED)
     return SkillResult("Our branches are open Monday to Friday, 9:00 to 17:00.", ["kb://branches/opening-hours"], "public")
 
 
@@ -33,8 +41,14 @@ async def suitability(req: SkillRequest) -> SkillResult:
 
 
 async def prepare(req: SkillRequest) -> SkillResult:
+    positions = next(iter((req.data.get("inputs") or {}).get("holdings") or []), {}).get("positions") or []
+    resolved = resolve_sale(req.data.get("slots") or {}, positions, "core://positions/demo")
+    if isinstance(resolved, SkillResult):
+        return resolved
+    pos, units = resolved
     return SkillResult("Order prepared.", ["core://quotes/demo"], "client_confidential", {"action": {
-        "instrument": "Tech ETF", "quantity": 50, "account_mask": "****1234", "estimated_amount": 6200, "currency": "CHF",
+        "instrument": pos["instrument"], "quantity": units, "account_mask": "****1234",
+        "estimated_amount": round(units * PRICES.get(pos["instrument"], 100.0)), "currency": "CHF",
     }})
 
 

@@ -6,6 +6,8 @@ Four categories:
 * safety: input guard, PII redaction and output guard behaviour.
 * policy: allow/deny decisions from the local policy engine (kept in parity with the Rego policy).
 * e2e: whole turns through an isolated orchestrator talking to the reference agents in-process.
+  A case with ``turns`` replays a conversation in one session, checking every turn, so follow-up
+  questions, clarifications and slot filling are covered as users experience them.
 
 The runner takes the catalogue, guard and routing configuration to test, so
 the same suite measures the live configuration and a proposed change. A change
@@ -107,6 +109,9 @@ def load_suite(path: str) -> list[dict[str, Any]]:
     for c in cases:
         if c.get("kind") not in CATEGORY:
             raise ConfigError(f"eval case {c.get('id')}: unknown kind {c.get('kind')!r}")
+        if c.get("turns") is not None and (c["kind"] != "e2e" or not all(isinstance(t, dict) and t.get("text") and
+                                                                          t.get("expect_type") for t in c["turns"])):
+            raise ConfigError(f"eval case {c.get('id')}: turns are for e2e cases and each needs text and expect_type")
     return cases
 
 
@@ -175,7 +180,9 @@ class EvalRunner:
 
     async def _routing(self, case: dict[str, Any], router: Router) -> EvalResult:
         decision = await router.route(case["text"], set(case.get("disabled_intents") or []))
-        if decision.source == "disabled":
+        if decision.segments:
+            actual = "+".join(intent.id for _, intent in decision.segments)
+        elif decision.source == "disabled":
             actual = "disabled"
         elif decision.needs_clarification or decision.intent is None:
             actual = "clarify"
@@ -259,19 +266,33 @@ class EvalRunner:
         )
         await service.open_session(session_id="eval", user=UserContext("eval-user", case.get("acr", "standard"), "eval"),
                                    subject_token="", token_expires_at=0)
-        response = await service.handle_turn(TurnRequest("eval", "t1", case["text"]))
-        problems = []
-        if response.type.value != case["expect_type"]:
-            problems.append(f"type {response.type.value}")
-        for needle in case.get("must_contain") or []:
-            if needle.lower() not in response.text.lower():
-                problems.append(f"missing '{needle}'")
-        for needle in case.get("must_not_contain") or []:
-            if needle.lower() in response.text.lower():
-                problems.append(f"contains '{needle}'")
-        if case.get("expect_sources") and not response.sources:
-            problems.append("no sources")
-        if case.get("expect_intent") and response.intent != case["expect_intent"]:
-            problems.append(f"intent {response.intent}")
-        return EvalResult(case["id"], "e2e", "e2e", not problems, {"type": case["expect_type"], "intent": case.get("expect_intent")},
-                          {"type": response.type.value, "intent": response.intent, "text": response.text[:200]}, "; ".join(problems), case["text"])
+        turns = case.get("turns") or [case]
+        problems: list[str] = []
+        actual: list[dict[str, Any]] = []
+        for i, turn in enumerate(turns, 1):
+            response = await service.handle_turn(TurnRequest("eval", f"t{i}", turn["text"]))
+            actual.append({"type": response.type.value, "intent": response.intent, "text": response.text[:200]})
+            prefix = f"turn {i}: " if len(turns) > 1 else ""
+            problems += [prefix + p for p in _turn_problems(turn, response)]
+        expected: Any = {"type": case["expect_type"], "intent": case.get("expect_intent")} if "turns" not in case else [
+            {"type": t["expect_type"], "intent": t.get("expect_intent")} for t in turns]
+        text = case.get("text") or " / ".join(t["text"] for t in turns)
+        return EvalResult(case["id"], "e2e", "e2e", not problems, expected, actual[0] if "turns" not in case else actual,
+                          "; ".join(problems), text)
+
+
+def _turn_problems(turn: dict[str, Any], response: Any) -> list[str]:
+    problems = []
+    if response.type.value != turn["expect_type"]:
+        problems.append(f"type {response.type.value}")
+    for needle in turn.get("must_contain") or []:
+        if needle.lower() not in response.text.lower():
+            problems.append(f"missing '{needle}'")
+    for needle in turn.get("must_not_contain") or []:
+        if needle.lower() in response.text.lower():
+            problems.append(f"contains '{needle}'")
+    if turn.get("expect_sources") and not response.sources:
+        problems.append("no sources")
+    if turn.get("expect_intent") and response.intent != turn["expect_intent"]:
+        problems.append(f"intent {response.intent}")
+    return problems

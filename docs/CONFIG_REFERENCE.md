@@ -131,6 +131,11 @@ YAML file from `ORCH_CONFIG_FILE`. Environment overrides use the prefix `ORCH__`
 | `messages.busy` | `We're very busy right now. Please try again in a moment, or I can arrange a call back.` | `ORCH__MESSAGES__BUSY` | Spoken under load shedding. |
 | `messages.handover` | `Let me connect you with one of our advisors who can help further.` | `ORCH__MESSAGES__HANDOVER` | Spoken when handing over to a human advisor. |
 | `messages.clarify_default` | `Could you tell me a bit more about what you'd like to do?` | `ORCH__MESSAGES__CLARIFY_DEFAULT` | Clarifying question when the intent has none. |
+| `messages.clarify_choice` | `Just to be sure: would you like {options}?` | `ORCH__MESSAGES__CLARIFY_CHOICE` | Question when a request matches several intents; `{options}` lists their labels. |
+| `messages.clarify_repeat_prefix` | `Sorry, I still need to know which you mean.` | `ORCH__MESSAGES__CLARIFY_REPEAT_PREFIX` | Put before a clarifying question when the user repeats the same request. |
+| `messages.out_of_scope` | `I'm sorry, I can't help with that. I can tell you how your portfolio is doing, answer general questions about the bank, suggest a rebalancing, or sell a holding for you.` | `ORCH__MESSAGES__OUT_OF_SCOPE` | Spoken when nothing (including the knowledge base) can answer the request; says what the assistant can do. |
+| `messages.cancelled` | `Okay, I've cancelled that.` | `ORCH__MESSAGES__CANCELLED` | Spoken when the user cancels an open question ("never mind"). |
+| `messages.action_mismatch` | `I couldn't prepare exactly the order you asked for, so I haven't done anything. An advisor can help you with it.` | `ORCH__MESSAGES__ACTION_MISMATCH` | Spoken when a prepared transaction does not match what the user asked for; nothing is sent for approval. |
 | `messages.failure` | `I couldn't complete that just now. Please try again shortly.` | `ORCH__MESSAGES__FAILURE` | Spoken when agents fail on information requests. |
 | `messages.partial_suffix` | `Some information is temporarily unavailable.` | `ORCH__MESSAGES__PARTIAL_SUFFIX` | Appended when part of an answer is missing. |
 | `messages.transactions_unavailable` | `I can't carry out transactions at the moment. An advisor can help you.` | `ORCH__MESSAGES__TRANSACTIONS_UNAVAILABLE` | Spoken when transactions are disabled or unavailable. |
@@ -189,6 +194,9 @@ YAML file from `MA_CONFIG_FILE`. Environment overrides use the prefix `MA__`.
 | `behaviour.holding_after_ms` | `900` | `MA__BEHAVIOUR__HOLDING_AFTER_MS` | Delay before the holding phrase. |
 | `behaviour.unavailable` | `I'm having trouble right now. Please try again shortly, or I can connect you with an advisor.` | `MA__BEHAVIOUR__UNAVAILABLE` | Spoken when the orchestrator cannot be reached. |
 | `behaviour.approval_rpc_method` | `orchestrator.approval_request` | `MA__BEHAVIOUR__APPROVAL_RPC_METHOD` | LiveKit RPC method the client app registers for approval requests. |
+| `behaviour.approval_cancel_rpc_method` | `orchestrator.approval_cancel` | `MA__BEHAVIOUR__APPROVAL_CANCEL_RPC_METHOD` | LiveKit RPC method asking the client app to decline the open approval when the user says "cancel". |
+| `behaviour.local_commands` | `true` | `MA__BEHAVIOUR__LOCAL_COMMANDS` | Handle control phrases (stop, shut up, cancel, repeat, wait, greetings, thanks, help) in the agent instead of the orchestrator. |
+| `behaviour.command_replies` | see source | `MA__BEHAVIOUR__COMMAND_REPLIES` | Replies to control phrases, per key: stop, cancel, cancel_unconfirmed, nothing_to_repeat, resume, wait, greeting, thanks, done, goodbye, help. |
 | `behaviour.workflow_poll_interval_s` | `2.0` | `MA__BEHAVIOUR__WORKFLOW_POLL_INTERVAL_S` | Polling interval for transaction status. |
 | `behaviour.workflow_poll_timeout_s` | `660.0` | `MA__BEHAVIOUR__WORKFLOW_POLL_TIMEOUT_S` | Stop polling after this long (approval timeout plus execution). |
 | `behaviour.outcome_messages` | see source | `MA__BEHAVIOUR__OUTCOME_MESSAGES` | Spoken per transaction outcome: completed, declined, expired, failed. |

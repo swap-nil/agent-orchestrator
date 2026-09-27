@@ -175,7 +175,26 @@ Steps may declare `depends_on` (steps run in parallel layers in dependency order
 
 The loader enforces the rules that make the catalogue safe: step dependencies form a DAG; every step names a registered agent and one of its skills; writes only on agents registered for writes; any intent with a write step is R3, and every R3 intent has exactly one write step and a `readback_template`. Transactions follow a prepare-then-execute shape: read steps run inline and the step before the write returns the proposed action in `data.action`; the read-back is rendered from those fields (`{quantity}`, `{instrument}` and so on; only plain field names are allowed).
 
-When several intents match equally, the user is asked to clarify; the orchestrator never guesses between them. An optional model classifier (`routing.model_classifier`) can pick among R0 and R1 intents when no rule matches, and validation prevents it from being allowed to choose advice or transactions.
+When several intents match equally, the user is asked to clarify; the orchestrator never guesses between them. The question names the options from each intent's `label` ("Just to be sure: would you like to sell part of a holding or an overview of your portfolio?"), and the next turn can answer it with "the second one", "the overview" or "sell". Repeating the same request gets a clearer question, and after `routing.max_clarification_rounds` the user is handed over. An optional model classifier (`routing.model_classifier`) can pick among R0 and R1 intents when no rule matches, and validation prevents it from being allowed to choose advice or transactions.
+
+### 6.1 Exclusions, compound requests, slots and the user's words
+
+```yaml
+- id: trade.sell
+  label: to sell part of a holding          # used in "did you mean A or B?"
+  patterns:
+    - "^\\W*((please|can you|i want to)\\s+)*sell\\b"
+  exclude_patterns:                         # "should I sell ...?" is advice, never an order
+    - "^\\W*(should|shall|would|could) (i|we)\\b"
+  slots:
+    - {name: instrument, kind: instrument, required: true, prompt: Which of your holdings would you like to sell?}
+    - {name: quantity, kind: quantity, required: true, prompt: "How much of the {instrument} would you like to sell?"}
+```
+
+* **`exclude_patterns`** veto an intent when any of them matches, whatever its patterns say.
+* **Compound requests.** When a request matches several intents and splits cleanly on "and", "then" or a comma ("How is my portfolio and sell half of my SMI tracker"), each part is served in turn, reads first, and the answers are joined. At most one part may be advice or a transaction; otherwise the user is asked to clarify.
+* **Slots** are filled from the user's words by fixed rules (`orchestrator/slots.py`), never by a model: `instrument` keeps the phrase naming a holding, `quantity` becomes `{"units": 50}` or `{"fraction": 0.5}` ("half", "25 percent", "all"). A missing required slot is asked for, with its `prompt` (which may use the other slots), before any agent runs; the next turn's answer fills it, and asking about something else drops the question, as does "never mind". Slots reach every step as `data.slots`. An agent that cannot use them (the holding is not in the portfolio, several holdings match, more units than held) answers `input-required` with a question and `data.missing` naming the slot; the orchestrator asks that question and keeps the other slots. Before an approval is requested, the prepared `data.action` is checked against the slots: an order for another instrument or another number of units is refused (`action_mismatch`) and never shown for confirmation.
+* **`include_query: true`** on a step sends it the PII-redacted request as `data.query`. The loader allows it only in R0 intents on steps whose data classes are all `public`, so the user's words never reach a personalised, advice or transaction agent. The FAQ step uses it to search the knowledge base. A step that answers `input-required` without text (nothing in the knowledge base matches) makes the orchestrator say what it can help with (`messages.out_of_scope`) instead of reading out unrelated articles.
 
 ## 7. The agent registry
 
@@ -205,7 +224,24 @@ When an approval request arrives, the app shows the action to the user and trigg
 hashlib.sha256(json.dumps(action, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
 ```
 
-The app then calls its own backend, which calls `POST /v1/approvals/{approval_id}` on the orchestrator with body `{"approve": true, "action_hash": "..."}` and the step-up user token in the `X-User-Token` header. The backend's identity must be listed under `auth.route_callers.approvals`. The master agent speaks the outcome when the workflow finishes.
+The app then calls its own backend, which calls `POST /v1/approvals/{approval_id}` on the orchestrator with body `{"approve": true, "action_hash": "..."}` and the step-up user token in the `X-User-Token` header. The backend's identity must be listed under `auth.route_callers.approvals`. The master agent speaks the outcome when the workflow finishes, including the trade agent's confirmation (instrument, units, reference).
+
+The app should also register `orchestrator.approval_cancel` (`behaviour.approval_cancel_rpc_method`): when the user says "cancel" while a confirmation is open, the master agent sends `{"approval_id": ...}` and the app declines that approval through its backend, exactly as if the user had pressed Decline, replying `{"declined": true}`. An app without the handler loses nothing: the agent tells the user that nothing happens without confirmation, and the approval expires.
+
+### 10.1 Conversation control
+
+The master agent handles conversation control itself (`master_agent/commands.py`, `behaviour.local_commands`), with fixed phrase lists and only when the whole utterance is the command, so "stop the order for my Nestle shares" is still a request:
+
+| The user says | The agent |
+|---|---|
+| stop, shut up, be quiet, that's enough | stops talking and drops the answer to a request still in flight; says nothing if it was talking, "Okay." otherwise |
+| cancel, never mind, forget it | asks the app to decline an order awaiting confirmation; or lets the orchestrator drop its open question; or says "Okay, no problem." |
+| say that again, sorry?, pardon | repeats its last answer |
+| go on, continue | repeats the answer it was stopped in |
+| hold on, one moment | stops talking: "Sure, take your time." |
+| hello, thanks, that's all, bye, what can you do? | answers locally (`behaviour.command_replies`) |
+
+An order read-back is spoken without interruptions, so "stop" does not cut it short; "cancel" declines the order instead.
 
 ## 11. Deploying to AKS
 
