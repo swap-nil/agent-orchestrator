@@ -1,0 +1,37 @@
+# Public entry point of the test environment: one host name, one Let's Encrypt
+# certificate (obtained and renewed by Caddy). LiveKit shares the host by path;
+# its routes (/rtc, /twirp, /whip, /agent) do not overlap with the app's.
+{
+	email {$ACME_EMAIL}
+}
+
+{$APP_HOST} {
+	# Optional source allowlist (ALLOWED_SOURCE_RANGES in test.env; default: everyone).
+	# Certificate validation is handled by Caddy before these routes, so it keeps working.
+	@denied not remote_ip {$ALLOWED_SOURCE_RANGES}
+	respond @denied "Forbidden" 403
+
+	request_body {
+		max_size 64KB
+	}
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+
+	# LiveKit signalling (WebSocket) and API. Media flows directly to the VM (UDP 50000-60000, TCP 7881).
+	@livekit path /rtc /rtc/* /twirp/* /whip /whip/* /agent
+	reverse_proxy @livekit host.docker.internal:7880
+
+	# Token service: the only API exposed to the internet.
+	reverse_proxy /v1/voice-sessions token-service:8090
+
+	# Command center behind the Entra sign-in proxy; the live stream is server-sent events.
+	@console path /oauth2/* /console /console/* /admin/cc /admin/cc/*
+	reverse_proxy @console console-proxy:4180 {
+		flush_interval -1
+	}
+
+	# Test client (single-page app and its backend).
+	reverse_proxy test-client:8080
+}

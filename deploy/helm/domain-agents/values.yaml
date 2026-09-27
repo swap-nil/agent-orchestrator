@@ -1,4 +1,4 @@
-# Shared values from deploy/azure (tenantId, apps.agents, images.mock, approvalPublicKey).
+# Shared global values (deploy/helm/examples/global.example.yaml) (tenantId, apps.agents, images.mock, approvalPublicKey).
 global: {}
 
 image:

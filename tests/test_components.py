@@ -127,6 +127,32 @@ class IdentityTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TokenExchangeError):
             await missing.token_for("s2", "user", "api://a", ".default")
 
+    async def test_managed_identity_assertion(self):
+        imds = []
+
+        async def get(url, params):
+            imds.append((url, params))
+            return 200, {"access_token": "mi.jwt", "expires_in": "86399"}
+
+        transport = FakeTransport(lambda m, u, r: HttpResponse(200, {"access_token": "x", "expires_in": 60}))
+        cfg = IdentityConfig(mode="entra_obo", token_endpoint="https://idp/token", client_auth="managed_identity")
+        ex = TokenExchanger(cfg, transport, environ={"AZURE_CLIENT_ID": "mi-orch"}, imds_get=get)
+        await ex.token_for("s", "user", "api://a", ".default")
+        await ex.token_for("s", "user", "api://b", ".default")
+        form = transport.requests[0][2]["form"]
+        self.assertEqual(form["client_assertion"], "mi.jwt")
+        self.assertEqual(imds[0][1]["resource"], "api://AzureADTokenExchange")
+        self.assertEqual(imds[0][1]["client_id"], "mi-orch")
+        self.assertEqual(len(imds), 1)  # the assertion is cached across exchanges
+        with self.assertRaisesRegex(TokenExchangeError, "client id"):
+            await TokenExchanger(cfg, transport, environ={}, imds_get=get).token_for("s", "user", "api://a", ".default")
+
+        async def refused(url, params):
+            return 400, {"error": "invalid_request", "error_description": "Identity not found"}
+        bad = TokenExchanger(cfg, transport, environ={"AZURE_CLIENT_ID": "x"}, imds_get=refused)
+        with self.assertRaisesRegex(TokenExchangeError, "Identity not found"):
+            await bad.token_for("s", "user", "api://a", ".default")
+
     async def test_cache_and_errors(self):
         now = [1000.0]
         transport = FakeTransport(lambda m, u, r: HttpResponse(200, {"access_token": "x", "expires_in": 60}))

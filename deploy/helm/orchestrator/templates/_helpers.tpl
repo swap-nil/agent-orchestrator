@@ -5,7 +5,7 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 orchestrator/cell: {{ .Values.cell | quote }}
 {{- end -}}
 
-{{/* Image: a full reference from global.images (set by deploy/azure, pinned by digest) or repository:tag. */}}
+{{/* Image: a full reference from global.images (pinned by digest) or repository:tag. */}}
 {{- define "orch.image" -}}
 {{- $images := (.Values.global | default dict).images | default dict -}}
 {{- if $images.orchestrator -}}{{ $images.orchestrator }}{{- else -}}{{ .Values.image.repository }}:{{ .Values.image.tag }}{{- end -}}
@@ -21,7 +21,7 @@ orchestrator/cell: {{ .Values.cell | quote }}
 {{- end -}}
 
 {{/*
-Entra ID settings as ORCH__ overrides, derived from global values (deploy/azure):
+Entra ID settings as ORCH__ overrides, derived from the global values:
 issuer/JWKS for callers, users and operators, the on-behalf-of client, and the
 caller allowlist per route group (managed identity client ids).
 */}}
@@ -84,7 +84,7 @@ securityContext:
   volumeMounts: [{name: policy, mountPath: /policy, readOnly: true}]
 {{- end -}}
 
-{{/* Workload identity client id and Key Vault: global values (deploy/azure) win over chart values. */}}
+{{/* Workload identity client id and Key Vault: global values win over chart values. */}}
 {{- define "orch.clientId" -}}
 {{- (((.Values.global | default dict).identities | default dict).orchestrator) | default .Values.serviceAccount.workloadIdentityClientId -}}
 {{- end -}}

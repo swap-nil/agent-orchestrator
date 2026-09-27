@@ -209,7 +209,7 @@ The app then calls its own backend, which calls `POST /v1/approvals/{approval_id
 
 ## 11. Deploying to AKS
 
-For a complete test environment (AKS, Entra ID, LiveKit, fake core-banking backend) deployed by one script, see [AZURE_TEST_ENV.md](AZURE_TEST_ENV.md). This section describes the production deployment.
+For a complete test environment on one Azure VM (Entra ID, LiveKit, fake core-banking backend) deployed by one script, see [AZURE_TEST_ENV.md](AZURE_TEST_ENV.md). This section describes the production deployment.
 
 Build one image per component from `deploy/docker/Dockerfile` (`--build-arg EXTRAS=orchestrator|agent|token-service|domain`), push it to your registry and deploy by digest.
 
@@ -264,7 +264,7 @@ Confirm that `validate-config` passes on the exact production file; every route 
 
 **The voice agent never joins.** The worker rejects dispatch metadata with a bad signature or older than `dispatch_max_age_s`; check that `MA_DISPATCH_KEY` is identical in the token service and master agent and that clocks are in sync.
 
-**Token exchange fails in AKS.** Check that the pod has the `azure.workload.identity/use: "true"` label, that `AZURE_FEDERATED_TOKEN_FILE` is set, and that the federated credential's subject matches the service account.
+**Token exchange fails in AKS.** Check that the pod has the `azure.workload.identity/use: "true"` label, that `AZURE_FEDERATED_TOKEN_FILE` is set, and that the federated credential's subject matches the service account. On a VM (`identity.client_auth: managed_identity`), check that the managed identity in `AZURE_CLIENT_ID` is attached to the VM and that the app's federated credential names its object id as subject.
 
 ## 15. What is verified and what needs integration testing
 

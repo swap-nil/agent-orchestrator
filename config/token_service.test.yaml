@@ -1,9 +1,9 @@
-# Token service in the Azure test environment. The Helm chart sets the tenant
-# specific values as TS__... overrides: user_jwt issuer/audience/jwks_url,
+# Token service in the Azure test environment (VM). deploy/azure/deploy.sh sets the
+# tenant specific values as TS__... overrides: user_jwt issuer/audience/jwks_url,
 # livekit.url and orchestrator_auth_scope.
-profile: dev   # in-cluster HTTP to the orchestrator; user tokens are still validated (user_jwt is set)
+profile: dev   # plain HTTP to the orchestrator on the VM; user tokens are still validated (user_jwt is set)
 cell_id: test-cell-01
-orchestrator_url: http://orchestrator.orchestrator.svc.cluster.local:8080
+orchestrator_url: http://orchestrator:8080
 user_jwt:
   algorithms: [RS256]
 acr_claim: roles

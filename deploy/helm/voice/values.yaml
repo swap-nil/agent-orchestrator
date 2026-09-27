@@ -1,4 +1,4 @@
-# Shared values from deploy/azure (tenantId, livekitUrl, speechRegion, apps.orchestrator,
+# Shared global values (deploy/helm/examples/global.example.yaml) (tenantId, livekitUrl, speechRegion, apps.orchestrator,
 # identities.masterAgent, images.agent, keyVaultName).
 global: {}
 

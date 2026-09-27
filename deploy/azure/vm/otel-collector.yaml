@@ -1,0 +1,26 @@
+# OpenTelemetry Collector on the test VM: receive OTLP from the orchestrator,
+# strip GenAI content attributes as a second line of defence, export to
+# Application Insights (connection string from Key Vault, secrets/otel.env).
+receivers:
+  otlp:
+    protocols:
+      grpc: {endpoint: 0.0.0.0:4317}
+      http: {endpoint: 0.0.0.0:4318}
+processors:
+  memory_limiter: {check_interval: 1s, limit_mib: 400, spike_limit_mib: 100}
+  attributes/strip-content:
+    actions:
+      - {key: gen_ai.input.messages, action: delete}
+      - {key: gen_ai.output.messages, action: delete}
+      - {key: gen_ai.system_instructions, action: delete}
+  batch: {}
+exporters:
+  azuremonitor:
+    connection_string: ${env:APPLICATIONINSIGHTS_CONNECTION_STRING}
+extensions:
+  health_check: {endpoint: 0.0.0.0:13133}
+service:
+  extensions: [health_check]
+  pipelines:
+    traces: {receivers: [otlp], processors: [memory_limiter, attributes/strip-content, batch], exporters: [azuremonitor]}
+    metrics: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [azuremonitor]}

@@ -9,7 +9,7 @@ make test                 # 155 unit tests, no network needed
 make console              # command center + whole stack in one process: http://127.0.0.1:8765/console
 make evals                # golden eval suite, the same gate that guards runtime changes
 make compose-up           # full local stack (Redis, PostgreSQL, Temporal, OPA, OTel, LiveKit, demo agents)
-make azure-deploy         # complete test environment in Azure, with a fake core-banking backend
+make azure-deploy         # complete test environment on one Azure VM, with a fake core-banking backend
 ```
 
 Then follow the scripted conversation in the user guide, section 4.
@@ -20,7 +20,7 @@ Then follow the scripted conversation in the user guide, section 4.
 |---|---|
 | [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Architecture, quick start, catalogue and policy authoring, adding agents, client integration, AKS deployment, operations, security checklist, troubleshooting |
 | [docs/COMMAND_CENTER.md](docs/COMMAND_CENTER.md) | The operations console: live decisions and why, dashboards, evals, kill switches, governed runtime changes, roles, API |
-| [docs/AZURE_TEST_ENV.md](docs/AZURE_TEST_ENV.md) | Deploying the complete test environment to Azure (AKS, Entra ID, LiveKit, fake bank), testing it, differences from production, teardown |
+| [docs/AZURE_TEST_ENV.md](docs/AZURE_TEST_ENV.md) | Deploying the complete test environment to one Azure VM (Docker Compose, Entra ID, LiveKit, fake bank), testing it, differences from production, teardown |
 | [docs/CONFIG_REFERENCE.md](docs/CONFIG_REFERENCE.md) | Every configuration key for all three services, generated from the code |
 | [docs/REVIEW.md](docs/REVIEW.md) | Findings and fixes from the two review passes, and open items to verify |
 
@@ -36,7 +36,7 @@ src/mock_backend/      fake core-banking API (seeded customers, portfolios, pric
 src/test_client/       browser test client (Entra sign-in, voice and chat over LiveKit, approvals) and its client backend
 config/                profiles (dev, compose, prod), intent catalogue, agent registry, golden evals, service configs
 policies/              OPA policy (Rego v1) and its tests
-deploy/                Dockerfile, docker compose, Helm charts, Azure test environment (Bicep, scripts), Envoy A2A gateway, OTel collector
+deploy/                Dockerfile, docker compose, Helm charts, Azure test environment (Bicep, VM stack, scripts), Envoy A2A gateway, OTel collector
 requirements/          pinned dependency locks per image (make lock)
 scripts/               configuration reference generator
 tests/                 unit, contract and consistency tests

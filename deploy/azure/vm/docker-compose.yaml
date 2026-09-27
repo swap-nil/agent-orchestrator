@@ -1,0 +1,254 @@
+# The complete test environment on one Azure VM (Docker Compose). Installed to
+# /opt/agent-orchestrator and started by bootstrap.sh; deploy/azure/deploy.sh
+# ships this directory with the generated files:
+#
+#   .env                 images (pinned by digest), host, ids, config checksums
+#   env/<service>.env    non-secret settings per service (tenant, app ids, identities)
+#   secrets/<svc>.env    secrets read from Key Vault by bootstrap.sh (root only)
+#   config/              agents.yaml with Entra audiences, envoy.yaml, orchestrator.rego
+#   livekit/livekit.yaml LiveKit keys (bootstrap.sh)
+#
+# Only Caddy (80/443) and LiveKit media (7881/tcp, 50000-60000/udp) are reachable
+# from outside. LiveKit and the master agent use the host network: WebRTC needs
+# the port range, and the agent reaches LiveKit over the VM's private address.
+name: agent-orchestrator
+
+x-defaults: &defaults
+  restart: unless-stopped
+  logging: {driver: json-file, options: {max-size: 10m, max-file: "3"}}
+
+x-app: &app
+  <<: *defaults
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+
+x-agent: &agent
+  <<: *app
+  image: ${IMG_MOCK:?}
+  command: ["uvicorn", "domain_agents.serve:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+    interval: 10s
+    start_period: 20s
+  depends_on: [mock-backend]
+
+x-orchestrator: &orchestrator
+  <<: *app
+  image: ${IMG_ORCHESTRATOR:?}
+  env_file: [env/orchestrator.env, secrets/orchestrator.env]
+  labels: {config-hash: "${ORCHESTRATOR_CONFIG_HASH:-}"}
+  volumes: ["./config/agents.yaml:/etc/orchestrator/agents.yaml:ro"]
+
+services:
+  # ------------------------------------------------------------------ edge
+  caddy:
+    <<: *defaults
+    image: caddy:2.10-alpine
+    ports: ["80:80", "443:443"]
+    environment:
+      APP_HOST: ${APP_HOST:?}
+      ACME_EMAIL: ${ACME_EMAIL:?}
+      ALLOWED_SOURCE_RANGES: ${ALLOWED_SOURCE_RANGES:-0.0.0.0/0 ::/0}
+    labels: {config-hash: "${CADDY_CONFIG_HASH:-}"}
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [test-client, token-service, console-proxy]
+
+  test-client:
+    <<: *app
+    image: ${IMG_MOCK:?}
+    command: ["uvicorn", "test_client.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+    env_file: [env/test-client.env]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 10s
+    depends_on: [orchestrator, mock-backend]
+
+  token-service:
+    <<: *app
+    image: ${IMG_TOKEN_SERVICE:?}
+    command: ["uvicorn", "token_service.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8090", "--no-server-header"]
+    env_file: [env/token-service.env, secrets/token-service.env]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/healthz', timeout=3)"]
+      interval: 10s
+    depends_on:
+      redis: {condition: service_healthy}
+      orchestrator: {condition: service_started}
+
+  # Command center sign-in: operators sign in with Entra ID; the proxy forwards their
+  # ID token (aud = console app, roles = CC.*) to the orchestrator on every /admin/cc call.
+  console-proxy:
+    <<: *app
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.4
+    command:
+      - --http-address=0.0.0.0:4180
+      - --provider=oidc
+      - --oidc-issuer-url=https://login.microsoftonline.com/${TENANT_ID:?}/v2.0
+      - --client-id=${CONSOLE_CLIENT_ID:?}
+      - --redirect-url=https://${APP_HOST:?}/oauth2/callback
+      - --upstream=http://orchestrator:8080/
+      - --scope=openid profile email offline_access
+      - --email-domain=*
+      - --oidc-email-claim=preferred_username
+      - --insecure-oidc-allow-unverified-email=true
+      - --code-challenge-method=S256
+      - --pass-authorization-header=true
+      - --reverse-proxy=true
+      - --skip-provider-button=true
+      - --cookie-name=_cc_session
+      - --cookie-secure=true
+      - --cookie-samesite=lax
+      - --cookie-expire=8h
+      - --cookie-refresh=30m
+      - --flush-interval=200ms
+      - --upstream-timeout=120s
+      - --silence-ping-logging=true
+    env_file: [secrets/console-proxy.env]
+    depends_on: [orchestrator]
+
+  # ------------------------------------------------------------------ voice
+  livekit:
+    <<: *defaults
+    image: livekit/livekit-server:v1.13.7
+    command: ["--config", "/etc/livekit.yaml"]
+    network_mode: host
+    labels: {config-hash: "${LIVEKIT_CONFIG_HASH:-}"}
+    volumes: ["./livekit/livekit.yaml:/etc/livekit.yaml:ro"]
+
+  master-agent:
+    <<: *defaults
+    image: ${IMG_AGENT:?}
+    command: ["python", "-m", "master_agent.agent", "start"]
+    network_mode: host
+    env_file: [env/master-agent.env, secrets/master-agent.env]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # Jobs drain gracefully: LiveKit stops dispatching and running calls may finish.
+    stop_grace_period: 10m
+    healthcheck:
+      # 503 until the worker is registered with LiveKit.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/', timeout=3)"]
+      interval: 15s
+      start_period: 60s
+    depends_on: [livekit, orchestrator]
+
+  # ------------------------------------------------------------------ orchestrator
+  # Creates the audit table (idempotent) before the API starts.
+  orchestrator-migrate:
+    <<: *orchestrator
+    restart: "no"
+    command: ["python", "-m", "orchestrator.cli", "migrate-audit"]
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  orchestrator:
+    <<: *orchestrator
+    # Loopback only: the master agent (host network) calls it here.
+    ports: ["127.0.0.1:8080:8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=3)"]
+      interval: 10s
+      start_period: 60s
+      retries: 6
+    depends_on:
+      orchestrator-migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+      opa: {condition: service_started}
+      temporal: {condition: service_started}
+      a2a-gateway: {condition: service_started}
+      otel-collector: {condition: service_started}
+
+  orchestrator-worker:
+    <<: *orchestrator
+    command: ["python", "-m", "orchestrator.workflows.worker"]
+    depends_on:
+      orchestrator: {condition: service_healthy}
+
+  opa:
+    <<: *app
+    image: openpolicyagent/opa:1.21.0-static
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--disable-telemetry", "/policy/orchestrator.rego"]
+    labels: {config-hash: "${OPA_CONFIG_HASH:-}"}
+    volumes: ["./config/orchestrator.rego:/policy/orchestrator.rego:ro"]
+
+  # ------------------------------------------------------------------ domain agents
+  # Call graph: orchestrator -> a2a-gateway -> agents -> mock-backend. Each agent route
+  # requires a delegated Entra token whose audience is that agent's app.
+  a2a-gateway:
+    <<: *defaults
+    image: envoyproxy/envoy:v1.35.3
+    command: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "info", "--disable-hot-restart"]
+    labels: {config-hash: "${ENVOY_CONFIG_HASH:-}"}
+    volumes: ["./config/envoy.yaml:/etc/envoy/envoy.yaml:ro"]
+    depends_on: [faq-agent, portfolio-agent, market-agent, advice-agent, compliance-agent, trade-agent]
+
+  faq-agent: {<<: *agent, env_file: [env/agent-faq-agent.env]}
+  portfolio-agent: {<<: *agent, env_file: [env/agent-portfolio-agent.env]}
+  market-agent: {<<: *agent, env_file: [env/agent-market-agent.env]}
+  advice-agent: {<<: *agent, env_file: [env/agent-advice-agent.env]}
+  compliance-agent: {<<: *agent, env_file: [env/agent-compliance-agent.env]}
+  trade-agent: {<<: *agent, env_file: [env/agent-trade-agent.env]}
+
+  # Fake core banking (the agents' tools). State is in memory; a restart restores the seed.
+  mock-backend:
+    <<: *app
+    image: ${IMG_MOCK:?}
+    command: ["uvicorn", "mock_backend.app:app", "--host", "0.0.0.0", "--port", "8080", "--no-server-header"]
+    # Loopback only: browse the fake bank through an SSH tunnel (docs/AZURE_TEST_ENV.md).
+    # Not 8081: the master agent's health server uses that port on the host network.
+    ports: ["127.0.0.1:8082:8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 10s
+
+  # ------------------------------------------------------------------ platform
+  redis:
+    <<: *defaults
+    image: redis:7.4-alpine
+    # The password comes from the environment, so it is not visible in the process list.
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    env_file: [secrets/redis.env]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$REDIS_PASSWORD\" redis-cli ping | grep -q PONG"]
+      interval: 5s
+
+  postgres:
+    <<: *defaults
+    image: postgres:16-alpine
+    environment: {POSTGRES_USER: orch, POSTGRES_DB: orch}
+    env_file: [secrets/postgres.env]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "orch", "-d", "orch"]
+      interval: 5s
+
+  # Temporal CLI dev server: one process, SQLite on the VM disk, UI on 8233 (loopback).
+  temporal:
+    <<: *defaults
+    image: temporalio/temporal:1.9.1
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--ui-ip", "0.0.0.0", "--db-filename", "/data/temporal.db",
+              "--namespace", "orchestrator-test", "--log-level", "warn"]
+    environment: {HOME: /tmp}
+    ports: ["127.0.0.1:8233:8233"]
+    volumes: ["./data/temporal:/data"]
+
+  otel-collector:
+    <<: *app
+    image: otel/opentelemetry-collector-contrib:0.135.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    env_file: [secrets/otel.env]
+    labels: {config-hash: "${OTEL_CONFIG_HASH:-}"}
+    volumes: ["./otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+
+volumes:
+  caddy-data: {}
+  caddy-config: {}
+  redis-data: {}
+  postgres-data: {}

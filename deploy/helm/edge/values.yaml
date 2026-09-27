@@ -1,4 +1,4 @@
-# Shared values from deploy/azure (tenantId, host, dnsLabel, livekitUrl, apps, identities,
+# Shared global values (deploy/helm/examples/global.example.yaml) (tenantId, host, dnsLabel, livekitUrl, apps, identities,
 # images.tokenService / images.mock, keyVaultName).
 global: {}
 
@@ -53,5 +53,5 @@ networkPolicy:
   enabled: true
   orchestratorNamespace: orchestrator
   agentsNamespace: agents
-  # Redis private endpoint (token service admission), must match deploy/azure/main.bicep.
+  # Redis private endpoint (token service admission), must match your VNet.
   redisCidr: 10.60.9.0/24

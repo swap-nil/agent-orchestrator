@@ -1,5 +1,5 @@
-# Orchestrator chart, Azure test environment. Used with the generated global
-# values (deploy/azure/.out/global.yaml) and the config files passed by deploy.sh:
+# Orchestrator chart, example values for a small AKS cluster. Used with the global
+# values (global.example.yaml) and the config files, e.g. by 'make helm-lint':
 #   --set-file config.orchestratorYaml=config/orchestrator.test.yaml (and intents, agents, evals)
 cell: test-cell-01
 replicaCount: 2
@@ -21,7 +21,7 @@ networkPolicy:
   enabled: true
   ingressNamespaces: [voice, edge]
   egressNamespaces: [agents, platform]
-  # Must match the subnets in deploy/azure/main.bicep (PostgreSQL delegated subnet, private endpoints).
+  # Must match your VNet (PostgreSQL delegated subnet, private endpoints).
   egressCidrs:
     - {cidr: 10.60.8.0/24, ports: [5432]}
     - {cidr: 10.60.9.0/24, ports: [10000]}

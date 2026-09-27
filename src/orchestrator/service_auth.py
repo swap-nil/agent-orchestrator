@@ -1,14 +1,19 @@
 """Service tokens for callers of the orchestrator (``auth.mode: jwt``).
 
 The token service, the master agent and the client backend authenticate to
-the orchestrator with an Entra ID app-only token obtained through AKS Workload
-Identity: the projected service-account token is the client assertion of a
-client-credentials grant, so no secret exists anywhere. The orchestrator
-checks the token's ``azp`` against ``auth.route_callers``.
+the orchestrator with an Entra ID app-only token of their managed identity, so
+no secret exists anywhere. The orchestrator checks the token's ``azp`` against
+``auth.route_callers``. ``AZURE_TOKEN_SOURCE`` selects how the token is obtained:
 
-The workload identity webhook injects ``AZURE_CLIENT_ID``, ``AZURE_TENANT_ID``,
-``AZURE_AUTHORITY_HOST`` and ``AZURE_FEDERATED_TOKEN_FILE``. With an empty
-scope the source is disabled and adds no header (mesh or local development).
+* ``workload_identity`` (default, AKS): the projected service-account token is
+  the client assertion of a client-credentials grant. The workload identity
+  webhook injects ``AZURE_CLIENT_ID``, ``AZURE_TENANT_ID``,
+  ``AZURE_AUTHORITY_HOST`` and ``AZURE_FEDERATED_TOKEN_FILE``.
+* ``managed_identity`` (Azure VM): the instance metadata service issues the
+  token for the user-assigned identity ``AZURE_CLIENT_ID``.
+
+With an empty scope the source is disabled and adds no header (mesh or local
+development).
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Mapping
 
-from .identity import CLIENT_ASSERTION_TYPE
+from .identity import CLIENT_ASSERTION_TYPE, ImdsGet, ManagedIdentityCredential, ManagedIdentityError, resource_of
 
 # (url, form) -> (status, json body)
 TokenPost = Callable[[str, dict[str, str]], Awaitable[tuple[int, dict[str, Any]]]]
@@ -47,12 +52,14 @@ class WorkloadIdentityToken:
         *,
         environ: Mapping[str, str] | None = None,
         post: TokenPost | None = None,
+        get: ImdsGet | None = None,
         clock: Callable[[], float] = time.time,
         refresh_skew_s: int = 120,
     ) -> None:
         self._scope = scope.strip()
         self._environ = os.environ if environ is None else environ
         self._post = post or _httpx_post
+        self._get = get
         self._clock = clock
         self._skew = refresh_skew_s
         self._token = ""
@@ -92,6 +99,12 @@ class WorkloadIdentityToken:
         async with self._lock:
             if self._token and self._expires_at - self._skew > self._clock():
                 return self._token
+            source = self._environ.get("AZURE_TOKEN_SOURCE", "workload_identity")
+            if source == "managed_identity":
+                self._token, self._expires_at = await self._managed_identity_token()
+                return self._token
+            if source != "workload_identity":
+                raise ServiceTokenError(f"unknown AZURE_TOKEN_SOURCE {source!r}")
             url, form = self._form()
             try:
                 status, body = await self._post(url, form)
@@ -102,6 +115,16 @@ class WorkloadIdentityToken:
             self._token = str(body["access_token"])
             self._expires_at = self._clock() + int(body.get("expires_in", 300))
             return self._token
+
+    async def _managed_identity_token(self) -> tuple[str, float]:
+        client_id = self._environ.get("AZURE_CLIENT_ID", "")
+        if not client_id:
+            raise ServiceTokenError("managed identity is not configured (AZURE_CLIENT_ID)")
+        credential = ManagedIdentityCredential(client_id, get=self._get, clock=self._clock, refresh_skew_s=self._skew)
+        try:
+            return await credential.token(resource_of(self._scope))
+        except ManagedIdentityError as exc:
+            raise ServiceTokenError(str(exc)) from exc
 
     async def headers(self) -> dict[str, str]:
         """Authorization header for one call, or nothing when disabled."""

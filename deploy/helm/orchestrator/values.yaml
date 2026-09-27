@@ -1,4 +1,4 @@
-# Shared values written by deploy/azure/deploy.sh (tenant, app and identity ids,
+# Shared global values (deploy/helm/examples/global.example.yaml: tenant, app and identity ids,
 # images pinned by digest, Key Vault). When global.tenantId is set, the chart sets
 # the Entra ID settings as ORCH__ overrides and rewrites agent audiences.
 global: {}

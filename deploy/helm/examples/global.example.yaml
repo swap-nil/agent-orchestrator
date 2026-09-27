@@ -1,5 +1,6 @@
-# Shape of deploy/azure/.out/global.yaml, which deploy.sh generates (all ids here are fake).
-# Every chart reads .Values.global; used by 'make helm-lint'.
+# Shared values for the Helm charts (AKS production deployment); all ids here are fake.
+# Every chart reads .Values.global; used by 'make helm-lint'. The Azure test environment
+# runs on one VM with Docker Compose instead (deploy/azure, docs/AZURE_TEST_ENV.md).
 global:
   tenantId: 11111111-1111-1111-1111-111111111111
   authorityHost: https://login.microsoftonline.com

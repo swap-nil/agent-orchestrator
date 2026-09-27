@@ -1,0 +1,24 @@
+#cloud-config
+# First boot of the test VM: Docker and Compose only. Everything else (images,
+# configuration, secrets) is installed by deploy.sh through Run Command on every
+# deployment, so this file never changes: Azure does not allow changing the custom
+# data of an existing VM.
+package_update: true
+packages: [docker.io, docker-compose-v2, python3, curl]
+
+write_files:
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {"log-driver": "json-file", "log-opts": {"max-size": "10m", "max-file": "3"}}
+  # Larger UDP buffers for LiveKit media.
+  - path: /etc/sysctl.d/90-livekit.conf
+    permissions: "0644"
+    content: |
+      net.core.rmem_max = 5000000
+      net.core.wmem_max = 5000000
+
+runcmd:
+  - sysctl --system
+  - systemctl enable --now docker
+  - mkdir -p /opt/agent-orchestrator

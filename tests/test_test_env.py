@@ -61,6 +61,30 @@ class ServiceTokenTests(unittest.IsolatedAsyncioTestCase):
         self.now += 3600
         self.assertEqual(await source.token(), "tok-2")  # refreshed near expiry
 
+    async def test_managed_identity_from_imds(self):
+        calls = []
+
+        async def get(url, params):
+            calls.append((url, params))
+            return 200, {"access_token": f"mi-{len(calls)}", "expires_in": "3600"}
+
+        env = {"AZURE_TOKEN_SOURCE": "managed_identity", "AZURE_CLIENT_ID": "mi-client"}
+        source = WorkloadIdentityToken("api://orch/.default", environ=env, get=get, post=self.post, clock=lambda: self.now)
+        self.assertEqual(await source.headers(), {"Authorization": "Bearer mi-1"})
+        url, params = calls[0]
+        self.assertEqual(url, "http://169.254.169.254/metadata/identity/oauth2/token")
+        self.assertEqual(params["resource"], "api://orch")  # IMDS takes a v1 resource, not a scope
+        self.assertEqual(params["client_id"], "mi-client")
+        await source.token()
+        self.assertEqual(len(calls), 1)  # cached
+        self.now += 3600
+        self.assertEqual(await source.token(), "mi-2")
+        self.assertEqual(self.calls, [])  # no client-credentials grant
+        with self.assertRaisesRegex(ServiceTokenError, "AZURE_CLIENT_ID"):
+            await WorkloadIdentityToken("s", environ={"AZURE_TOKEN_SOURCE": "managed_identity"}, get=get).token()
+        with self.assertRaisesRegex(ServiceTokenError, "AZURE_TOKEN_SOURCE"):
+            await WorkloadIdentityToken("s", environ={"AZURE_TOKEN_SOURCE": "nope"}, get=get).token()
+
     async def test_errors(self):
         with self.assertRaises(ServiceTokenError):
             await WorkloadIdentityToken("s", environ={}, post=self.post).token()
@@ -311,6 +335,154 @@ class TestEnvConfigTests(unittest.TestCase):
             self.assertIn(name, agents)
             self.assertEqual(set(spec.skills), set(agents[name]._skills), name)
 
+
+
+def load_script(name: str):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, "deploy", "azure", "scripts", f"{name}.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def read_compose_env(path: str) -> dict[str, str]:
+    """The subset of the Compose env-file syntax the renderer writes: 'literal' and "with \n escapes"."""
+    values = {}
+    with open(path, encoding="utf-8") as fh:
+        for line in fh.read().splitlines():
+            key, raw = line.split("=", 1)
+            if raw[:1] == "'" and raw[-1:] == "'":
+                values[key] = raw[1:-1]
+            elif raw[:1] == '"' and raw[-1:] == '"':
+                values[key] = raw[1:-1].replace("\\n", "\n")
+            else:
+                values[key] = raw
+    return values
+
+
+class VmBundleTests(unittest.TestCase):
+    """deploy/azure: the files rendered for the test VM fit the Compose file, the configs and bootstrap.sh."""
+
+    AGENTS = ["faq-agent", "portfolio-agent", "market-agent", "advice-agent", "compliance-agent", "trade-agent"]
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        import shutil
+        import uuid
+        from types import SimpleNamespace
+        cls.tmp = tempfile.mkdtemp()
+        cls.addClassCleanup(shutil.rmtree, cls.tmp, True)
+        cls.ids = {k: str(uuid.uuid4()) for k in ("orchestrator", "tokenService", "clientBackend", "masterAgent")}
+        cls.tenant = str(uuid.uuid4())
+        outputs = {k: {"value": v} for k, v in {
+            "vmName": "vm-t", "acrName": "acrt", "acrLoginServer": "acrt.azurecr.io", "keyVaultName": "kv-t",
+            "tenantId": cls.tenant, "appHost": "t-app.switzerlandnorth.cloudapp.azure.com", "speechRegion": "switzerlandnorth",
+            "identities": [{"key": k, "clientId": v, "principalId": str(uuid.uuid4())} for k, v in cls.ids.items()],
+        }.items()}
+        cls.apps = {"orchestrator": str(uuid.uuid4()), "console": str(uuid.uuid4()), "spa": str(uuid.uuid4()),
+                    "agents": {a: str(uuid.uuid4()) for a in cls.AGENTS}}
+        images = "".join(f"{k}=acrt.azurecr.io/x@sha256:{'a' * 64}\n"
+                         for k in ("IMG_ORCHESTRATOR", "IMG_AGENT", "IMG_TOKEN_SERVICE", "IMG_MOCK"))
+        files = {"outputs.json": json.dumps(outputs), "entra.json": json.dumps({"apps": cls.apps}), "images.env": images,
+                 "key.pem": ApprovalSigner(APPROVAL_KEY.encode()).public_key_pem()}
+        for name, content in files.items():
+            with open(os.path.join(cls.tmp, name), "w", encoding="utf-8") as fh:
+                fh.write(content)
+        cls.out = os.path.join(cls.tmp, "vm")
+
+        def tmp(name):
+            return os.path.join(cls.tmp, name)
+
+        load_script("render_vm_bundle").render(SimpleNamespace(
+            outputs=tmp("outputs.json"), entra=tmp("entra.json"), images=tmp("images.env"), approval_public_key=tmp("key.pem"),
+            acme_email="ops@example.com", allowed_source_ranges="203.0.113.0/24, 198.51.100.7/32",
+            agents=os.path.join(ROOT, "config", "agents.yaml"), policy=os.path.join(ROOT, "policies", "orchestrator.rego"),
+            vm_dir=os.path.join(ROOT, "deploy", "azure", "vm"), out=cls.out))
+
+    def env(self, name: str) -> dict[str, str]:
+        return read_compose_env(os.path.join(self.out, "env", f"{name}.env"))
+
+    def test_compose_references_only_rendered_or_bootstrapped_files(self):
+        import re
+
+        import yaml
+        with open(os.path.join(self.out, "docker-compose.yaml"), encoding="utf-8") as fh:
+            compose = yaml.safe_load(fh)
+        with open(os.path.join(self.out, "bootstrap.sh"), encoding="utf-8") as fh:
+            bootstrap = fh.read()
+        from_bootstrap = set(re.findall(r"envfile (secrets/[\w-]+\.env)", bootstrap)) | {"livekit/livekit.yaml"}
+
+        def provided(path):
+            return path in from_bootstrap or os.path.isfile(os.path.join(self.out, path))
+
+        for name, service in compose["services"].items():
+            for path in service.get("env_file", []):
+                self.assertTrue(provided(path), f"{name}: {path}")
+            for volume in service.get("volumes", []):
+                source = volume.split(":")[0]
+                if source.startswith("./") and source != "./data/temporal":  # directory created by bootstrap.sh
+                    self.assertTrue(provided(source[2:]), f"{name}: {source}")
+        self.assertEqual({s for s in compose["services"] if s.endswith("-agent")} - {"master-agent"}, set(self.AGENTS))
+        # Every secret the Bicep template stores is read by bootstrap.sh, and the reverse.
+        with open(os.path.join(ROOT, "deploy", "azure", "main.bicep"), encoding="utf-8") as fh:
+            bicep = fh.read()
+        stored = set(re.findall(r"name: '([a-z0-9-]+)', value:", bicep)) | {"speech-key", "appinsights-connection-string"}
+        read = set(re.findall(r"\$\(secret ([a-z0-9-]+)\)", bootstrap)) - {"console-client-secret"}  # from entra_setup.py
+        self.assertEqual(read, stored)
+
+    def test_orchestrator_environment_and_registry(self):
+        from orchestrator.catalogue import load_catalogue
+        from orchestrator.config import load_config
+        env = self.env("orchestrator")
+        self.assertEqual(env["ORCH_CONFIG_FILE"], "/app/config/orchestrator.test.yaml")
+        config = load_config(os.path.join(ROOT, "config", "orchestrator.test.yaml"), environ=env)
+        self.assertEqual(config.identity.client_auth, "managed_identity")
+        self.assertEqual(env["AZURE_CLIENT_ID"], self.ids["orchestrator"])
+        self.assertEqual(config.auth.route_callers["turns"], [self.ids["masterAgent"]])
+        self.assertEqual(config.auth.route_callers["sessions"], [self.ids["tokenService"]])
+        self.assertEqual(config.auth.jwt.audience, self.apps["orchestrator"])
+        self.assertEqual(config.command_center.operator_jwt.audience, self.apps["console"])
+        self.assertEqual(config.catalogue.registry_file, "/etc/orchestrator/agents.yaml")  # mounted by Compose
+        cat = load_catalogue(os.path.join(ROOT, "config", "intents.yaml"), os.path.join(self.out, "config", "agents.yaml"),
+                             config.auth.acr_levels)
+        self.assertEqual({n: a.audience for n, a in cat.agents.items()},
+                         {n: f"api://{app}" for n, app in self.apps["agents"].items()})
+
+    def test_callers_use_their_managed_identity(self):
+        for name, identity in (("token-service", "tokenService"), ("master-agent", "masterAgent"),
+                               ("test-client", "clientBackend")):
+            env = self.env(name)
+            self.assertEqual(env["AZURE_TOKEN_SOURCE"], "managed_identity", name)
+            self.assertEqual(env["AZURE_CLIENT_ID"], self.ids[identity], name)
+        self.assertEqual(self.env("token-service")["TS__LIVEKIT__URL"], "wss://t-app.switzerlandnorth.cloudapp.azure.com")
+        self.assertEqual(self.env("master-agent")["LIVEKIT_URL"], "ws://127.0.0.1:7880")
+
+    def test_agents_and_gateway(self):
+        import json
+
+        from domain_agents.serve import create_app
+        self.assertIn("BEGIN PUBLIC KEY", self.env("agent-trade-agent")["APPROVAL_PUBLIC_KEY"])
+        for name in self.AGENTS:
+            env = self.env(f"agent-{name}")
+            self.assertEqual(env["AGENT_AUDIENCE"], self.apps["agents"][name])
+            create_app(env)
+        with open(os.path.join(self.out, "config", "envoy.yaml"), encoding="utf-8") as fh:
+            envoy = json.load(fh)
+        hcm = envoy["static_resources"]["listeners"][0]["filter_chains"][0]["filters"][0]["typed_config"]
+        jwt = next(f for f in hcm["http_filters"] if f["name"] == "envoy.filters.http.jwt_authn")["typed_config"]
+        self.assertEqual({n: p["audiences"] for n, p in jwt["providers"].items()},
+                         {n: [app] for n, app in self.apps["agents"].items()})
+        issuer = f"https://login.microsoftonline.com/{self.tenant}/v2.0"
+        self.assertTrue(all(p["issuer"] == issuer for p in jwt["providers"].values()))
+        routes = {r["match"].get("path"): r for r in hcm["route_config"]["virtual_hosts"][0]["routes"]}
+        self.assertEqual(routes["/agents/trade-agent"]["route"]["retry_policy"], {"num_retries": 0})
+
+    def test_settings(self):
+        settings = read_compose_env(os.path.join(self.out, "settings.env"))
+        self.assertEqual(settings["ALLOWED_SOURCE_RANGES"], "203.0.113.0/24 198.51.100.7/32")
+        self.assertEqual(settings["CONSOLE_CLIENT_ID"], self.apps["console"])
+        self.assertEqual(settings["KEY_VAULT"], "kv-t")
 
 if __name__ == "__main__":
     unittest.main()

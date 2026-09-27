@@ -83,8 +83,9 @@ YAML file from `ORCH_CONFIG_FILE`. Environment overrides use the prefix `ORCH__`
 | `identity.mode` | `disabled` | `ORCH__IDENTITY__MODE` | `entra_obo`, `rfc8693` or `disabled` (dev). Exchanges the user token per agent call. |
 | `identity.token_endpoint` | `""` | `ORCH__IDENTITY__TOKEN_ENDPOINT` | IdP token endpoint. |
 | `identity.client_id` | `""` | `ORCH__IDENTITY__CLIENT_ID` | Orchestrator's client id at the IdP. |
-| `identity.client_auth` | `workload_identity` | `ORCH__IDENTITY__CLIENT_AUTH` | `workload_identity` (federated assertion, prod) or `secret` (dev). |
+| `identity.client_auth` | `workload_identity` | `ORCH__IDENTITY__CLIENT_AUTH` | `workload_identity` (AKS federated assertion, prod), `managed_identity` (managed identity token from IMDS as the federated assertion, Azure VM) or `secret` (dev). |
 | `identity.federated_token_file` | `""` | `ORCH__IDENTITY__FEDERATED_TOKEN_FILE` | Path to the projected federated token; default `$AZURE_FEDERATED_TOKEN_FILE`. |
+| `identity.managed_identity_client_id` | `""` | `ORCH__IDENTITY__MANAGED_IDENTITY_CLIENT_ID` | Client id of the managed identity used with `client_auth: managed_identity`; default `$AZURE_CLIENT_ID`. |
 | `identity.client_secret_env` | `ORCH_IDP_CLIENT_SECRET` | `ORCH__IDENTITY__CLIENT_SECRET_ENV` | Environment variable with the client secret (client_auth=secret only). |
 | `identity.sender_constraint` | `mtls` | `ORCH__IDENTITY__SENDER_CONSTRAINT` | Declared token binding at the resource: `mtls` or `dpop` (prod), `none` (dev). |
 | `identity.refresh_skew_s` | `30` | `ORCH__IDENTITY__REFRESH_SKEW_S` | Refresh delegated tokens this many seconds before expiry. |

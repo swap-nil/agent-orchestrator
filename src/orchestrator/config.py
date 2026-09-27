@@ -170,9 +170,11 @@ class IdentityConfig:
     client_id: str = ""
     # How the orchestrator authenticates to the IdP for the exchange:
     #   workload_identity: federated assertion from AKS Workload Identity (no secret)
+    #   managed_identity: federated assertion from an Azure managed identity via IMDS (Azure VM, no secret)
     #   secret: client secret from client_secret_env (development only)
     client_auth: str = "workload_identity"
     federated_token_file: str = ""  # defaults to $AZURE_FEDERATED_TOKEN_FILE
+    managed_identity_client_id: str = ""  # defaults to $AZURE_CLIENT_ID
     client_secret_env: str = "ORCH_IDP_CLIENT_SECRET"
     sender_constraint: str = "mtls"  # mtls | dpop | none
     refresh_skew_s: int = 30
@@ -506,7 +508,7 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _check_enum(errors, "auth.mode", config.auth.mode, ("none", "jwt", "mesh_xfcc"))
     _check_enum(errors, "policy.engine", config.policy.engine, ("opa", "local"))
     _check_enum(errors, "identity.mode", config.identity.mode, ("rfc8693", "entra_obo", "disabled"))
-    _check_enum(errors, "identity.client_auth", config.identity.client_auth, ("workload_identity", "secret"))
+    _check_enum(errors, "identity.client_auth", config.identity.client_auth, ("workload_identity", "managed_identity", "secret"))
     _check_enum(errors, "identity.sender_constraint", config.identity.sender_constraint, ("mtls", "dpop", "none"))
     _check_enum(errors, "session.store", config.session.store, ("memory", "redis"))
     _check_enum(errors, "audit.sink", config.audit.sink, ("memory", "jsonl", "postgres"))
@@ -576,7 +578,9 @@ def _production_rules(config: OrchestratorConfig) -> list[str]:
     if config.identity.mode == "disabled":
         errors.append("prod: identity.mode must not be 'disabled' (on-behalf-of tokens are required)")
     if config.identity.client_auth == "secret":
-        errors.append("prod: identity.client_auth must be 'workload_identity' (no client secrets in production)")
+        errors.append(
+            "prod: identity.client_auth must be 'workload_identity' or 'managed_identity' (no client secrets in production)"
+        )
     if config.identity.sender_constraint == "none":
         errors.append("prod: identity.sender_constraint must be 'mtls' or 'dpop'")
     if config.session.store != "redis":

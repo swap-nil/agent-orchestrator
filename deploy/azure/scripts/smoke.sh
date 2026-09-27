@@ -1,38 +1,40 @@
 #!/usr/bin/env bash
-# Smoke checks for the Azure test environment: workloads, TLS, public endpoints,
-# orchestrator readiness and the golden eval suite inside the cluster.
-#   deploy/azure/scripts/smoke.sh <app-host> <livekit-host>
+# Smoke checks for the Azure test environment: public endpoints and TLS from here,
+# then the checks inside the VM (services, orchestrator readiness, configuration,
+# golden evals) through Run Command.
+#   deploy/azure/scripts/smoke.sh <app-host> <resource-group> <vm-name>
 set -uo pipefail
 APP_HOST="${1:?app host}"
-LIVEKIT_HOST="${2:?livekit host}"
+RESOURCE_GROUP="${2:?resource group}"
+VM="${3:?vm name}"
 fail=0
 check() {  # description, command...
   local what=$1; shift
   if "$@" >/dev/null 2>&1; then printf '  ok    %s\n' "$what"; else printf '  FAIL  %s\n' "$what"; fail=1; fi
 }
 status() { curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$@"; }
-
-echo "Workloads"
-for ns in platform agents orchestrator edge voice; do
-  for d in $(kubectl -n "$ns" get deploy -o name 2>/dev/null); do
-    check "$ns/${d#*/} available" kubectl -n "$ns" wait --for=condition=available "$d" --timeout=5s
+# The certificate is requested when Caddy starts; allow a few minutes on the first run.
+# shellcheck disable=SC2317  # called through check()
+wait_tls() {
+  for _ in $(seq 1 30); do
+    curl -sf --max-time 10 -o /dev/null "https://$APP_HOST/healthz" && return 0
+    sleep 10
   done
-done
+  return 1
+}
 
 echo "Public endpoints"
-check "TLS certificate issued" kubectl -n edge wait --for=condition=ready certificate/edge-tls --timeout=5m
-check "test client https://$APP_HOST/" test "$(status "https://$APP_HOST/healthz")" = 200
+check "TLS certificate issued, test client https://$APP_HOST/" wait_tls
 check "token service rejects anonymous calls" test "$(status -X POST "https://$APP_HOST/v1/voice-sessions")" = 401
 check "console requires sign-in" sh -c "case \$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 https://$APP_HOST/console) in 302|401|403) exit 0;; *) exit 1;; esac"
-check "LiveKit https://$LIVEKIT_HOST/" test "$(status "https://$LIVEKIT_HOST/")" = 200
+# LiveKit answers /rtc/validate without a token with 401; Caddy would answer 502 if LiveKit were down.
+check "LiveKit signalling https://$APP_HOST/rtc" test "$(status "https://$APP_HOST/rtc/validate")" = 401
 
-echo "Orchestrator"
-check "readiness (Redis reachable)" kubectl -n orchestrator exec deploy/orchestrator -c orchestrator -- \
-  python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/readyz', timeout=5)"
-check "configuration and catalogue valid" kubectl -n orchestrator exec deploy/orchestrator -c orchestrator -- \
-  python -m orchestrator.cli validate-config
-check "golden evals pass the change gate" kubectl -n orchestrator exec deploy/orchestrator -c orchestrator -- \
-  python -m orchestrator.cli run-evals
+echo "Inside the VM"
+message=$(az vm run-command invoke -g "$RESOURCE_GROUP" -n "$VM" --command-id RunShellScript \
+  --scripts "bash /opt/agent-orchestrator/smoke.sh" --query "value[0].message" -o tsv 2>&1)
+printf '%s\n' "$message" | grep -E '^\s+(ok|FAIL) ' || printf '%s\n' "$message" | tail -20
+printf '%s\n' "$message" | grep -q SMOKE_OK || fail=1
 
 [ "$fail" = 0 ] && echo "All smoke checks passed." || echo "Some checks failed; see docs/AZURE_TEST_ENV.md (troubleshooting)."
 exit "$fail"

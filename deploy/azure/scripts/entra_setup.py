@@ -8,8 +8,8 @@ Creates or updates, all prefixed with --prefix:
 * the orchestrator app: API for user tokens (scope ``access_as_user``), app
   roles ``low``/``standard``/``stepup`` carrying the assurance level, app role
   ``Orchestrator.Call`` for the calling workloads, delegated permissions on
-  every agent scope (on-behalf-of), and a federated credential for the
-  orchestrator's Kubernetes service account (no client secret);
+  every agent scope (on-behalf-of), and a federated credential that trusts the
+  orchestrator's managed identity on the VM (no client secret);
 * the console app (oauth2-proxy sign-in) with app roles ``CC.*`` and a client
   secret stored in Key Vault as ``console-client-secret``;
 * the test client SPA with permission to call the orchestrator.
@@ -150,10 +150,13 @@ def ensure_assignment(resource_sp: str, principal_id: str, role_id: str) -> None
           {"principalId": principal_id, "resourceId": resource_sp, "appRoleId": role_id})
 
 
-def ensure_federation(app_object_id: str, name: str, issuer: str, subject: str) -> None:
+def ensure_federation(app_object_id: str, name: str, issuer: str, subject: str, stale: tuple[str, ...] = ()) -> None:
+    """Federated credential ``name``; credentials named in ``stale`` (earlier setups) are removed."""
     body = {"name": name, "issuer": issuer, "subject": subject, "audiences": ["api://AzureADTokenExchange"],
-            "description": "AKS workload identity (no client secret)"}
+            "description": "Managed identity of the orchestrator (no client secret)"}
     existing = graph("GET", f"/applications/{app_object_id}/federatedIdentityCredentials").get("value", [])
+    for old in (f for f in existing if f["name"] in stale):
+        graph("DELETE", f"/applications/{app_object_id}/federatedIdentityCredentials/{old['id']}")
     match = next((f for f in existing if f["name"] == name), None)
     if match is None:
         graph("POST", f"/applications/{app_object_id}/federatedIdentityCredentials", body)
@@ -166,7 +169,9 @@ def read_agents(path: str) -> dict[str, list[str]]:
     """Agent name -> skills from the registry (tiny parser: the file is flat, no PyYAML needed)."""
     agents: dict[str, list[str]] = {}
     current = None
-    for line in open(path, encoding="utf-8"):
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.readlines()
+    for line in lines:
         if m := re.match(r"\s*-\s*name:\s*([\w.-]+)", line):
             current = m.group(1)
             agents[current] = []
@@ -194,9 +199,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--prefix", required=True)
     ap.add_argument("--host", required=True, help="public host of the test environment")
-    ap.add_argument("--oidc-issuer", required=True, help="AKS OIDC issuer URL")
     ap.add_argument("--key-vault", required=True)
-    ap.add_argument("--identities", required=True, help="Bicep outputs JSON (identities: key -> clientId)")
+    ap.add_argument("--identities", required=True, help="Bicep outputs JSON (identities: key, clientId, principalId)")
     ap.add_argument("--agents", required=True, help="agent registry (config/agents.yaml)")
     ap.add_argument("--test-users", default="", help="comma-separated UPNs to receive all test roles")
     ap.add_argument("--rotate-console-secret", action="store_true")
@@ -204,6 +208,8 @@ def main() -> int:
     args = ap.parse_args()
     p = args.prefix
     tenant = json.loads(az("account", "show", "-o", "json"))["tenantId"]
+    outputs = json.load(open(args.identities, encoding="utf-8"))
+    identities = {i["key"]: i for i in outputs["identities"]["value"]}
 
     print("Agent apps")
     agents = read_agents(args.agents)
@@ -232,7 +238,9 @@ def main() -> int:
 
     orch = ensure_app(orch_name, orch_patch)
     orch_sp = ensure_sp(orch["appId"])
-    ensure_federation(orch["id"], "aks-orchestrator", args.oidc_issuer, "system:serviceaccount:orchestrator:orchestrator")
+    # The orchestrator authenticates as this app with a token of its managed identity (IMDS on the VM).
+    ensure_federation(orch["id"], "vm-orchestrator-identity", f"https://login.microsoftonline.com/{tenant}/v2.0",
+                      identities["orchestrator"]["principalId"], stale=("aks-orchestrator",))
 
     print("Console app")
     console_name = f"{p}-console"
@@ -280,11 +288,9 @@ def main() -> int:
               f"'Grant admin consent' on the apps {orch_name}, {console_name} and {p}-test-client.", file=sys.stderr)
 
     print("Role assignments")
-    outputs = json.load(open(args.identities, encoding="utf-8"))
-    identities = {i["key"]: i["clientId"] for i in outputs["identities"]["value"]}
     call_role = stable_id(orch_name, "role", "Orchestrator.Call")
     for key in ("tokenService", "clientBackend", "masterAgent"):
-        mi_sp = one(f"/servicePrincipals?$filter=appId eq '{identities[key]}'")
+        mi_sp = one(f"/servicePrincipals?$filter=appId eq '{identities[key]['clientId']}'")
         if mi_sp:
             ensure_assignment(orch_sp["id"], mi_sp["id"], call_role)
     people = [u for u in [signed_in_principal()] if u]
