@@ -1,5 +1,5 @@
 .PHONY: test lint opa-test compose-up compose-down run-dev lock helm-sync console evals console-seed \
-        helm-lint azure-deploy azure-smoke azure-destroy
+        helm-lint azure-deploy azure-deploy-app azure-smoke azure-destroy
 
 test:            ## unit tests (core; no network needed)
 	cd tests && python -m unittest discover -v
@@ -35,6 +35,9 @@ helm-lint:       ## lint and render every chart with example values (AKS)
 
 azure-deploy:    ## deploy or update the Azure test environment (see docs/AZURE_TEST_ENV.md)
 	deploy/azure/deploy.sh
+
+azure-deploy-app: ## rebuild and roll out images only; APPS="mock orchestrator" limits it (default: all)
+	deploy/azure/deploy-app.sh $(APPS)
 
 AZURE_OUTPUT = python3 -c "import json,sys; print(json.load(open('deploy/azure/.out/outputs.json'))[sys.argv[1]]['value'])"
 azure-smoke:     ## smoke checks against the deployed test environment

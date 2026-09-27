@@ -95,7 +95,7 @@ At the end it prints the URLs:
 - **Test client:** `https://<prefix>-app-<hash>.switzerlandnorth.cloudapp.azure.com/`
 - **Command center:** the same host, at `/console`
 
-**Updating.** Change code or configuration and run `deploy/azure/deploy.sh` again. Use `SKIP_BUILD=1` for configuration-only changes. Only containers whose image, environment or configuration file changed are recreated.
+**Updating.** Change code or configuration and run `deploy/azure/deploy.sh` again. Use `SKIP_BUILD=1` for configuration-only changes. For code-only changes, `deploy/azure/deploy-app.sh [NAME...]` (or `make azure-deploy-app APPS="..."`) rebuilds just the named images and rolls them out, skipping Bicep, Entra ID and the VM files. NAME is an image (`orchestrator`, `master-agent`, `token-service`, `mock`) or a service using it, e.g. `test-client`; with no name it rebuilds all four. Only containers whose image, environment or configuration file changed are recreated.
 
 ## 4. Testing it
 
