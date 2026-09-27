@@ -113,7 +113,8 @@ def create_app(config: TokenServiceConfig | None = None) -> FastAPI:
         payload: dict[str, Any] = {"session_id": plan.session_id, "user_token": token or None,
                                    "channel": body.channel, "locale": body.locale}
         if validator is None:
-            payload["dev_user"] = {"subject": "dev-user", "acr": "standard", "tenant": "dev"}
+            # Same subject as the test client and the domain agents, so approvals match the session.
+            payload["dev_user"] = {"subject": "local-dev-user", "acr": "standard", "tenant": "dev"}
         try:
             headers = {"traceparent": plan.traceparent, **await service_token.headers()}
             response = await orch.post("/v1/sessions", json=payload, headers=headers)

@@ -1,0 +1,33 @@
+# Local run without Docker (run-local.ps1 / scripts/local/run.py). Everything the
+# test environment has except Entra ID and the platform services: sessions in
+# memory, local policy engine, audit to a file, Temporal as the CLI dev server.
+# The API and the Temporal worker share one process (scripts/local/orchestrator_all_in_one.py),
+# so the worker sees the in-memory sessions.
+profile: dev
+service:
+  environment: dev
+  cell_id: local
+server:
+  host: 127.0.0.1
+  port: 8080
+catalogue:
+  intents_file: config/intents.yaml
+  registry_file: config/agents.yaml
+routing:
+  fallback_intent: faq.general
+a2a:
+  gateway_url: http://127.0.0.1:8443
+  verify_tls: false
+policy:
+  engine: local
+session:
+  store: memory
+audit:
+  sink: jsonl
+  jsonl_path: .local/audit.jsonl
+workflows:
+  enabled: true
+  temporal_target: 127.0.0.1:7233
+  namespace: default
+command_center:
+  show_utterances: true

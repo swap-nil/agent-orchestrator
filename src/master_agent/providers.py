@@ -8,6 +8,7 @@ Plugin option names differ per plugin version: check the plugin you pin.
 
 from __future__ import annotations
 
+import importlib
 from typing import Any, Callable
 
 
@@ -46,6 +47,13 @@ TTS_FACTORIES: dict[str, Callable[[dict[str, Any]], Any]] = {
     "cartesia": _cartesia_tts, "azure": _azure_tts, "elevenlabs": _elevenlabs_tts,
 }
 VAD_FACTORIES: dict[str, Callable[[dict[str, Any]], Any]] = {"silero": _silero_vad}
+
+
+def import_plugins(*modules: str) -> None:
+    """Import LiveKit plugins up front: they register themselves and must do so on the main
+    thread. Jobs run in a thread on some platforms (Windows), where a lazy import fails."""
+    for module in modules:
+        importlib.import_module(f"livekit.plugins.{module}")
 
 
 def build(kind: str, factories: dict[str, Callable[[dict[str, Any]], Any]], provider: str, options: dict[str, Any]) -> Any:

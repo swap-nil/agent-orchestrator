@@ -96,13 +96,17 @@ const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<
 const cfg = await (await fetch("/config.json")).json();
 let msal = null, account = null, room = null, pending = null;
 
-function say(who, text, cls) {
-  const p = document.createElement("p");
+function say(who, text, cls, p = null) {
+  if (!p) { p = document.createElement("p"); $("#transcript").append(p); }
   p.className = "msg " + (cls || "");
   p.innerHTML = who ? `<b>${esc(who)}:</b> ${esc(text)}` : esc(text);
-  $("#transcript").append(p);
   $("#transcript").scrollTop = $("#transcript").scrollHeight;
+  return p;
 }
+// One chat line per transcription segment. User speech arrives as a new stream per interim
+// result (full text so far, same segment id); agent speech arrives as one stream of deltas
+// paced with the audio. Replacing the line's text per stream handles both.
+const segments = new Map();
 const sys = (text) => say("", text, "sys");
 
 // ---------------------------------------------------------------- sign-in
@@ -185,9 +189,16 @@ $("#start").onclick = async () => {
     room.on(RoomEvent.ParticipantConnected, (p) => sys(`Assistant joined (${p.identity}).`));
     room.on(RoomEvent.Disconnected, () => { sys("Session ended."); room = null; setState("idle"); setConnected(false); });
     room.registerTextStreamHandler("lk.transcription", async (reader, from) => {
-      const text = (await reader.readAll()).trim();
-      if (text) say(from.identity === room.localParticipant.identity ? "You" : "Assistant", text, from.identity === room.localParticipant.identity ? "" : "agent");
+      const mine = from.identity === room.localParticipant.identity;
+      const attrs = reader.info.attributes || {};
+      const id = attrs["lk.segment_id"] || reader.info.id;
+      let text = "";
+      for await (const chunk of reader) {
+        text += chunk;
+        if (!text.trim()) continue;
+        segments.set(id, say(mine ? "You" : "Assistant", text.trim(), mine ? "" : "agent", segments.get(id)));
       }
+      if (attrs["lk.transcription_final"] === "true") segments.delete(id);
     });
     room.registerRpcMethod("orchestrator.approval_request", async (data) => { showApproval(JSON.parse(data.payload)); return JSON.stringify({shown: true}); });
     // The user said "cancel" to the assistant: decline the open confirmation through our backend, as if they pressed Decline.

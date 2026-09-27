@@ -1,0 +1,24 @@
+{
+    // Ctrl+Shift+B runs the default build task: the whole stack locally (run-local.ps1).
+    // Stop it with Ctrl+C in its terminal, or "Tasks: Terminate Task".
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Local: build and run",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/run-local.ps1"],
+            "group": {"kind": "build", "isDefault": true},
+            "presentation": {"panel": "dedicated", "focus": true, "clear": true},
+            "problemMatcher": []
+        },
+        {
+            "label": "Local: reinstall and run",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "${workspaceFolder}/run-local.ps1", "-Reinstall"],
+            "presentation": {"panel": "dedicated", "focus": true, "clear": true},
+            "problemMatcher": []
+        }
+    ]
+}

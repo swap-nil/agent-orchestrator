@@ -44,6 +44,8 @@ from .orchestrator_client import OrchestratorClient, OrchestratorUnavailable
 
 log = logging.getLogger("master_agent")
 CONFIG: MasterAgentConfig = load_master_config()
+providers.import_plugins(CONFIG.stt.provider, CONFIG.tts.provider, CONFIG.vad.provider,
+                         *(["turn_detector.multilingual"] if CONFIG.turn_detection == "multilingual" else []))
 
 
 class MasterAgent(Agent):

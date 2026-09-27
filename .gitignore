@@ -9,4 +9,8 @@ deploy/azure/.out/
 deploy/azure/test.env
 # Local tooling
 .ruff_cache/
-.vscode/
+.vscode/*
+!.vscode/tasks.json
+# Local run (run-local.ps1): binaries, logs, audit file, speech keys
+.local/
+.env.local

@@ -14,6 +14,14 @@ make azure-deploy         # complete test environment on one Azure VM, with a fa
 
 Then follow the scripted conversation in the user guide, section 4.
 
+### Test environment on your machine (voice included, no Docker)
+
+Copy `.env.local.example` to `.env.local` and set the Azure Speech key, then run
+`powershell -ExecutionPolicy Bypass -File run-local.ps1`, or press **Ctrl+Shift+B** in VS Code.
+It prepares `.venv`, downloads LiveKit and Temporal into `.local/`, starts every service with
+health checks and opens the test client at http://localhost:8000 (no sign-in; command center at
+http://localhost:8080/console). Ctrl+C stops everything; logs are in `.local/logs/`.
+
 ## Documentation
 
 | Document | Contents |

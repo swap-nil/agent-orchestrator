@@ -15,6 +15,8 @@ Configuration from the environment:
     ORCHESTRATOR_AUTH_SCOPE   e.g. api://<orchestrator-app-id>/.default (workload identity token)
     MOCK_BACKEND_URL          mock core-banking API
     TOKEN_SERVICE_PATH        public path of the token service (same host), default /v1/voice-sessions
+    TOKEN_SERVICE_URL         token service base URL; when set, this backend forwards TOKEN_SERVICE_PATH
+                              to it (local runs without a reverse proxy in front)
 
 Run: ``uvicorn test_client.app:create_app --factory --port 8080``
 """
@@ -26,8 +28,8 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from orchestrator.api.security import AuthError, JwtValidator
@@ -57,6 +59,7 @@ def create_app(environ: Any = None, *, validator: JwtValidator | None = None,
     orch = orchestrator or httpx.AsyncClient(base_url=env.get("ORCHESTRATOR_URL", "http://localhost:8080"), timeout=5.0)
     bank = backend or httpx.AsyncClient(base_url=env.get("MOCK_BACKEND_URL", "http://localhost:8081"), timeout=3.0)
     caller = service_token or WorkloadIdentityToken(env.get("ORCHESTRATOR_AUTH_SCOPE", ""))
+    token_service_path = env.get("TOKEN_SERVICE_PATH", "/v1/voice-sessions")
 
     app = FastAPI(title="Agent orchestrator test client", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -97,8 +100,20 @@ def create_app(environ: Any = None, *, validator: JwtValidator | None = None,
             "devMode": dev_mode, "tenantId": tenant, "clientId": spa_client,
             "authority": f"{env.get('AUTHORITY_HOST', 'https://login.microsoftonline.com').rstrip('/')}/{tenant}",
             "scopes": [f"api://{orch_app}/access_as_user"] if orch_app else [],
-            "tokenServicePath": env.get("TOKEN_SERVICE_PATH", "/v1/voice-sessions"),
+            "tokenServicePath": token_service_path,
         }
+
+    if env.get("TOKEN_SERVICE_URL"):
+        token_service = httpx.AsyncClient(base_url=env["TOKEN_SERVICE_URL"], timeout=10.0)
+
+        @app.post(token_service_path)
+        async def voice_session(request: Request) -> Response:
+            headers = {k: v for k, v in request.headers.items() if k.lower() in ("authorization", "content-type")}
+            try:
+                upstream = await token_service.post(token_service_path, content=await request.body(), headers=headers)
+            except httpx.HTTPError as exc:
+                raise HTTPException(502, "token service unavailable") from exc
+            return Response(upstream.content, upstream.status_code, media_type=upstream.headers.get("content-type"))
 
     @app.get("/api/me")
     async def me(authorization: str = Header(default="")) -> dict[str, Any]:
