@@ -37,6 +37,43 @@ SUFFIX=$(printf '%s' "$SUB_ID/$RESOURCE_GROUP" | openssl dgst -sha256 | awk '{pr
 APP_DNS_LABEL="${APP_DNS_LABEL:-$PREFIX-app-$SUFFIX}"
 LIVEKIT_DNS_LABEL="${LIVEKIT_DNS_LABEL:-$PREFIX-lk-$SUFFIX}"
 echo "subscription $SUB_ID, resource group $RESOURCE_GROUP, region $LOCATION"
+AKS_NODE_SIZE="${AKS_NODE_SIZE:-Standard_D4s_v5}"
+LIVEKIT_VM_SIZE="${LIVEKIT_VM_SIZE:-Standard_D2s_v5}"
+
+log "vCPU quota check ($LOCATION)"
+# Fail fast with a clear message instead of a Bicep preflight error: AKS needs its
+# 2 initial nodes plus 1 surge node for upgrades; the LiveKit VM needs one more.
+az vm list-usage -l "$LOCATION" -o json > "$OUT/usage.json"
+az vm list-skus -l "$LOCATION" --resource-type virtualMachines -o json \
+  --query "[?name=='$AKS_NODE_SIZE' || name=='$LIVEKIT_VM_SIZE']" > "$OUT/skus.json"
+py 'import json, sys
+usage = {u["name"]["value"]: u for u in json.load(open(sys.argv[1]))}
+skus = {s["name"]: s for s in json.load(open(sys.argv[2]))}
+need, problems = {}, []
+for size, count, role in ((sys.argv[3], 3, "AKS nodes (2 + 1 upgrade surge)"), (sys.argv[4], 1, "LiveKit VM")):
+    sku = skus.get(size)
+    if sku is None:
+        problems.append(f"{size} ({role}) is not offered in this region")
+        continue
+    blocked = [r.get("reasonCode") for r in sku.get("restrictions", []) if r.get("type") == "Location"]
+    if blocked:
+        problems.append(f"{size} ({role}) is restricted for this subscription: {blocked}")
+    vcpus = int(next(c["value"] for c in sku["capabilities"] if c["name"] == "vCPUs"))
+    need[sku["family"]] = need.get(sku["family"], 0) + count * vcpus
+need["cores"] = sum(need.values())
+print("  %-34s %7s %7s %7s" % ("quota", "needed", "in use", "limit"))
+for family, n in need.items():
+    u = usage.get(family, {"currentValue": 0, "limit": 0})
+    free = int(u["limit"]) - int(u["currentValue"])
+    label = "Total Regional vCPUs" if family == "cores" else family
+    print("  %-34s %7s %7s %7s" % (label, n, u["currentValue"], u["limit"]))
+    if n > free:
+        problems.append(f"{label}: need {n} vCPUs, only {free} free")
+if problems:
+    print("\nNot enough quota or unavailable sizes:\n  - " + "\n  - ".join(problems))
+    print("\nFix: request more quota (Portal > Quotas > Compute, this region), or set AKS_NODE_SIZE /"
+          " LIVEKIT_VM_SIZE in test.env to sizes of a family that has quota (docs/AZURE_TEST_ENV.md, section 2).")
+    sys.exit(1)' "$OUT/usage.json" "$OUT/skus.json" "$AKS_NODE_SIZE" "$LIVEKIT_VM_SIZE"
 
 if [ "$(az account show --query user.type -o tsv)" = "servicePrincipal" ]; then
   DEPLOYER_ID=$(az ad sp show --id "$(az account show --query user.name -o tsv)" --query id -o tsv); DEPLOYER_TYPE=ServicePrincipal
@@ -69,13 +106,14 @@ export PREFIX APP_DNS_LABEL LIVEKIT_DNS_LABEL DEPLOYER_ID DEPLOYER_TYPE ACME_EMA
   DISPATCH_KEY TEMPORAL_KEY LIVEKIT_KEY LIVEKIT_SECRET COOKIE_SECRET
 SSH_PUB=$(cat "$OUT/livekit_ssh.pub")
 export SSH_PUB SSH_SOURCE_CIDR="${SSH_SOURCE_CIDR:-}"
-export AKS_NODE_SIZE="${AKS_NODE_SIZE:-Standard_D4s_v5}"
+export AKS_NODE_SIZE LIVEKIT_VM_SIZE
 # shellcheck disable=SC2016  # Python source: "$schema" is a JSON key, not a shell variable
 py 'import json, os, sys
 e = os.environ
 p = {"prefix": e["PREFIX"], "appDnsLabel": e["APP_DNS_LABEL"], "livekitDnsLabel": e["LIVEKIT_DNS_LABEL"],
      "deployerPrincipalId": e["DEPLOYER_ID"], "deployerPrincipalType": e["DEPLOYER_TYPE"], "acmeEmail": e["ACME_EMAIL"],
      "livekitSshPublicKey": e["SSH_PUB"], "sshSourceCidr": e["SSH_SOURCE_CIDR"], "aksNodeSize": e["AKS_NODE_SIZE"],
+     "livekitVmSize": e["LIVEKIT_VM_SIZE"],
      "pgAdminPassword": e["PG_PASSWORD"], "sessionKey": e["SESSION_KEY"], "approvalKey": e["APPROVAL_KEY"],
      "dispatchKey": e["DISPATCH_KEY"], "temporalPayloadKey": e["TEMPORAL_KEY"], "livekitApiKey": e["LIVEKIT_KEY"],
      "livekitApiSecret": e["LIVEKIT_SECRET"], "consoleCookieSecret": e["COOKIE_SECRET"]}

@@ -62,7 +62,7 @@ Every hop uses Entra ID, as in production, with no client secrets except the con
 
 ## 2. Prerequisites
 
-- An Azure subscription where you are **Owner** (the templates create role assignments), with quota for 2-4 `Standard_D4s_v5` and one `Standard_D2s_v5` in Switzerland North.
+- An Azure subscription where you are **Owner** (the templates create role assignments), with vCPU quota in the region for the AKS nodes (2 to start, up to 4 with autoscaling, plus 1 during upgrades) and the LiveKit VM. Defaults: `Standard_D4s_v5` nodes and a `Standard_D2s_v5` VM, both in the DSv5 family. The deploy script checks quota first and stops with a table of what is missing. New and trial subscriptions often have 0 quota for some families: see which families have quota with `az vm list-usage -l switzerlandnorth -o table`, then either request an increase (Portal > Quotas > Compute) or set `AKS_NODE_SIZE` and `LIVEKIT_VM_SIZE` in `test.env` to sizes from a family that has quota. For example, `Standard_D2as_v5` (DASv5) or `Standard_B2ms` (BS) need about 8-10 vCPUs in total.
 - An Entra ID role that can register applications and grant tenant-wide consent (**Application Administrator** or **Cloud Application Administrator**). Without consent rights, the script says which apps an administrator must approve.
 - A shell with `az`, `kubectl`, `helm` (3.14+ or 4), `openssl`, `python3` and `ssh-keygen`. **Azure Cloud Shell (bash) has all of them**; upload or clone the repository there.
 - Resource providers registered once per subscription: `Microsoft.ContainerService`, `Microsoft.DBforPostgreSQL`, `Microsoft.Cache`, `Microsoft.CognitiveServices`, `Microsoft.KeyVault`, `Microsoft.ContainerRegistry`, `Microsoft.OperationalInsights` (`az provider register -n <name>`).
