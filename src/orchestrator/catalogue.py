@@ -85,6 +85,7 @@ def _parse_step(raw: dict[str, Any], where: str, agents: dict[str, AgentRecord])
             cost_units=int(raw.get("cost_units", agents[agent_name].cost_units if agent_name in agents else 1)),
             instruction=str(raw.get("instruction", "")),
             include_query=bool(raw.get("include_query", False)),
+            skip_if_slot=str(raw.get("skip_if_slot") or ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise ConfigError(f"{where}: invalid step ({exc})") from exc
@@ -173,6 +174,10 @@ def parse_intents(data: dict[str, Any], agents: dict[str, AgentRecord], acr_leve
             if s.include_query and (risk is not RiskClass.R0 or set(s.data_classes) - {"public"}):
                 # The user's words only ever go to public information steps.
                 raise ConfigError(f"{where}: step {s.id!r} may only use include_query in an R0 intent with public data")
+        slots = _parse_slots(raw.get("slots"), where)
+        for s in steps:
+            if s.skip_if_slot and (not s.optional or s.skip_if_slot not in {sp.name for sp in slots}):
+                raise ConfigError(f"{where}: step {s.id!r} may only use skip_if_slot on an optional step with a declared slot")
         has_writes = any(s.mode is StepMode.WRITE for s in steps)
         if has_writes and risk is not RiskClass.R3:
             raise ConfigError(f"{where}: intent {intent_id!r} has write steps and must be risk R3")
@@ -203,7 +208,7 @@ def parse_intents(data: dict[str, Any], agents: dict[str, AgentRecord], acr_leve
             readback_template=str(raw.get("readback_template", "")),
             label=str(raw.get("label", "")),
             exclude_patterns=exclude,
-            slots=_parse_slots(raw.get("slots"), where),
+            slots=slots,
         )
     if not intents:
         raise ConfigError("intent catalogue is empty")

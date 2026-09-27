@@ -84,6 +84,8 @@ class StepSpec:
     instruction: str = ""
     # R0 public steps only: receive the (PII-redacted) question as data.query, e.g. to search a knowledge base.
     include_query: bool = False
+    # Optional steps only: left out when this slot is filled (market prices are not needed for "my smallest position").
+    skip_if_slot: str = ""
 
 
 @dataclass(frozen=True)

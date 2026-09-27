@@ -14,6 +14,10 @@ Kinds:
   prepared action with :func:`instrument_matches`.
 * ``quantity``: ``{"units": 50}``, ``{"fraction": 0.5}`` ("half", "25 percent")
   or ``{"fraction": 1.0}`` ("all", "everything").
+* ``focus``: what a portfolio question is about, from a fixed vocabulary:
+  ``{"ask": "accounts" | "count" | "smallest" | "largest" | "total" | "list"}``
+  ("how many portfolios", "my smallest position", "what is it worth"). Absent
+  for an open question ("how is my portfolio doing").
 
 When the user answers a follow-up question ("which holding?"), the whole reply
 is the value, so :func:`extract_slots` takes the slot being asked for.
@@ -25,7 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-SLOT_KINDS = ("instrument", "quantity")
+SLOT_KINDS = ("instrument", "quantity", "focus")
 MAX_QUERY_CHARS = 60
 
 
@@ -143,6 +147,22 @@ def extract_instrument(text: str, *, bare: bool = False) -> dict[str, Any] | Non
     return {"query": query} if words and not words <= _PLACEHOLDER_TOKENS else None
 
 
+# Most specific first: "how many ... is my largest" asks about the largest.
+_FOCUS = (
+    ("smallest", re.compile(r"\b(smallest|lowest|least valuable|tiniest)\b", re.IGNORECASE)),
+    ("largest", re.compile(r"\b(largest|biggest|highest|most valuable|top holding|main holding)\b", re.IGNORECASE)),
+    ("accounts", re.compile(r"\bhow many (portfolios|accounts|depots)\b", re.IGNORECASE)),
+    ("count", re.compile(r"\bhow many\b", re.IGNORECASE)),
+    ("list", re.compile(r"\b(what do i (own|hold)|list|which (positions|holdings|investments))\b", re.IGNORECASE)),
+    ("total", re.compile(r"\b(total|worth|how much (is|are) my)\b", re.IGNORECASE)),
+)
+
+
+def extract_focus(text: str) -> dict[str, Any] | None:
+    """What a portfolio question asks about, or None for an open "how is it doing"."""
+    return next(({"ask": ask} for ask, pattern in _FOCUS if pattern.search(text)), None)
+
+
 def extract_slots(specs: tuple[SlotSpec, ...], text: str, asking: str = "") -> dict[str, Any]:
     """Fill the declared slots from ``text``. ``asking`` names the slot a follow-up question asked for."""
     found: dict[str, Any] = {}
@@ -152,6 +172,8 @@ def extract_slots(specs: tuple[SlotSpec, ...], text: str, asking: str = "") -> d
             value = extract_quantity(text, bare=bare)
         elif spec.kind == "instrument":
             value = extract_instrument(text, bare=bare)
+        elif spec.kind == "focus":
+            value = extract_focus(text)
         else:
             value = None
         if value is not None:

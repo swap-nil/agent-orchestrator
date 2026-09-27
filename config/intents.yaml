@@ -13,6 +13,10 @@ intents:
     required_acr: low
     patterns:
       - "opening hours|branch|fees? for|how do i|what is (a|an|the)"
+    # "What is the smallest position in my portfolio?" is about the customer's own holdings, not the bank,
+    # unless it asks about fees, interest or branches.
+    exclude_patterns:
+      - "^(?!.*\\b(fees?|charges?|costs?|interest|opening hours|branch(es)?)\\b).*\\bmy (portfolios?|holdings|positions|investments)\\b"
     steps:
       - id: answer
         agent: faq-agent
@@ -34,16 +38,23 @@ intents:
       - "how (is|are) my (investments|portfolios?)( doing)?"
       - "\\bwhat do i (own|hold|have invested)\\b"
     clarification_prompt: Would you like an overview of your whole portfolio or one account?
+    # A specific question ("how many portfolios", "my smallest position") gets a direct answer, without market prices.
+    slots:
+      - name: focus
+        kind: focus
     steps:
       - id: holdings
         agent: portfolio-agent
         skill: portfolio.holdings
         data_classes: [client_confidential]
-        instruction: Summarise the client's current holdings.
+        instruction: >-
+          Answer the question named in data.slots.focus (accounts, count, smallest, largest, total or list)
+          from the client's holdings; without a focus, summarise them.
       - id: prices
         agent: market-agent
         skill: market.quotes
         optional: true
+        skip_if_slot: focus
         data_classes: [public]
         instruction: Provide current prices for major indices.
 

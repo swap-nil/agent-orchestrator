@@ -333,6 +333,8 @@ class MessagesConfig:
     # {options} lists the matching intents' labels: "an overview of your portfolio or to sell part of a holding".
     clarify_choice: str = "Just to be sure: would you like {options}?"
     clarify_repeat_prefix: str = "Sorry, I still need to know which you mean."
+    # A plain "yes" to a "would you like A or B?" question: ask which, keeping the question open.
+    clarify_which: str = "Happy to help. Which one would you like: {options}?"
     out_of_scope: str = (
         "I'm sorry, I can't help with that. I can tell you how your portfolio is doing, answer general questions "
         "about the bank, suggest a rebalancing, or sell a holding for you."

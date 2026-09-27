@@ -9,10 +9,11 @@ checks it against the action hash and verifies the orchestrator's Ed25519
 approval token before calling the order API.
 
 Agents only receive the catalogue instruction and earlier steps' data, never
-the user's words, with two structured exceptions: the FAQ agent gets the
+the user's words, with structured exceptions: the FAQ agent gets the
 redacted question (``data.query``, public R0 step) to search the knowledge
-base, and the trade agent gets the slots the orchestrator extracted
-(``data.slots``: which holding, how much). The trade agent resolves the
+base, the portfolio agent gets what the question is about (``data.slots.focus``:
+smallest, largest, how many ...), and the trade agent gets the slots the
+orchestrator extracted (``data.slots``: which holding, how much). The trade agent resolves the
 holding against the customer's positions and asks back (input-required,
 ``data.missing``) instead of guessing when it is not held, ambiguous or the
 quantity is missing or too large.
@@ -130,6 +131,30 @@ def resolve_sale(slots: dict[str, Any], positions: list[dict[str, Any]], source:
     return pos, units
 
 
+def answer_holdings(pf: dict[str, Any], ask: str) -> str:
+    """The answer to a portfolio question (``ask`` from the focus slot), or a summary when there is none."""
+    positions = pf["positions"]  # largest first
+    total = f"CHF {pf['total_value_chf']:,}"
+    n = len(positions)
+    held = f"{n} position{'s' if n != 1 else ''}"
+    top, bottom = positions[0], positions[-1]
+    if ask == "accounts":
+        return f"You have one portfolio with us, account {pf['account_mask']}, holding {held} worth about {total}."
+    if ask == "count":
+        return f"You hold {held} worth about {total}."
+    if ask == "smallest":
+        return (f"Your smallest position is the {bottom['instrument']}: {bottom['units']} units worth about "
+                f"CHF {bottom['value_chf']:,}, {_pct(bottom['weight_pct'])} percent of your portfolio.")
+    if ask == "largest":
+        return (f"Your largest position is the {top['instrument']}: {top['units']} units worth about "
+                f"CHF {top['value_chf']:,}, {_pct(top['weight_pct'])} percent of your portfolio.")
+    if ask == "total":
+        return f"Your portfolio is worth about {total}, across {held}."
+    if ask == "list":
+        return f"You hold {_names(positions)}, worth about {total} in total."
+    return f"You hold {held} worth about {total}; the largest is the {top['instrument']} at {_pct(top['weight_pct'])} percent."
+
+
 def require_scope(skill: str, handler: SkillHandler) -> SkillHandler:
     """With a verified token, the delegated scope (``scp``) must name the skill being called."""
 
@@ -158,9 +183,7 @@ def build_backend_agents(
         if not positions:
             return SkillResult("You currently hold no investments with us.", [f"core://positions/{pf['customer_id']}"],
                                "client_confidential", {"positions": []})
-        top = positions[0]
-        text = (f"You hold {len(positions)} positions worth about CHF {pf['total_value_chf']:,}; "
-                f"the largest is the {top['instrument']} at {_pct(top['weight_pct'])} percent.")
+        text = answer_holdings(pf, str(((req.data.get("slots") or {}).get("focus") or {}).get("ask", "")))
         data = {"positions": [{k: p[k] for k in ("instrument_id", "instrument", "units", "value_chf", "asset_class")}
                               for p in positions],
                 "total_value_chf": pf["total_value_chf"], "risk_profile": pf["risk_profile"]}

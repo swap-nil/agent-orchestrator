@@ -23,7 +23,7 @@ from helpers import ROOT, FakeGateway, dev_config, make_service, open_session, t
 
 import httpx
 
-from domain_agents.backend_agents import DEV_SUBJECT, BankTools, build_backend_agents
+from domain_agents.backend_agents import DEV_SUBJECT, BankTools, answer_holdings, build_backend_agents
 from master_agent.commands import Command, ConversationState, classify, react
 from master_agent.config import BehaviourConfig
 from mock_backend.app import create_app as create_bank_app
@@ -33,7 +33,7 @@ from orchestrator.config import ConfigError, RoutingConfig
 from orchestrator.models import ResponseType, TurnRequest
 from orchestrator.router import Router
 from orchestrator.service import action_mismatch
-from orchestrator.slots import extract_instrument, extract_quantity, extract_slots, match_instruments, units_for
+from orchestrator.slots import extract_focus, extract_instrument, extract_quantity, extract_slots, match_instruments, units_for
 from orchestrator.transport import FakeTransport, HttpResponse
 
 ACR = ["low", "standard", "stepup"]
@@ -396,6 +396,12 @@ class TranscriptReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((r.type, r.intent), (ResponseType.ANSWER, "portfolio.overview"), r.text)
         self.assertIn(total, r.text)
         self.assertNotIn("open Monday", r.text)
+        self.assertIn(f"one portfolio with us, account {pf['account_mask']}", r.text)
+        self.assertNotIn("SMI", r.text)  # a count needs no market update
+
+        r = await self.say("What is the smallest position in My Portfolio?")
+        self.assertEqual((r.type, r.intent), (ResponseType.ANSWER, "portfolio.overview"), r.text)
+        self.assertIn(f"smallest position is the {pf['positions'][-1]['instrument']}", r.text)
 
         r = await self.say("Sell Emerging Markets ETF.")
         self.assertEqual(r.type, ResponseType.CLARIFY)
@@ -459,6 +465,87 @@ class MockBankRegressionTests(unittest.TestCase):
         self.assertEqual(bank.articles("What is the weather of Zurich today?"), [])
         self.assertEqual(bank.articles("Stop."), [])
         self.assertEqual([a["id"] for a in bank.articles("What are your opening hours?")], ["opening-hours"])
+
+
+# ---------------------------------------------------------------- follow-up review: specific portfolio questions
+
+
+class PortfolioQuestionTests(unittest.IsolatedAsyncioTestCase):
+    """A later chat: "How many portfolios do I have?" got a position count and index quotes, "What is the smallest
+    position in My Portfolio?" was asked back as bank information or portfolio, and "Yeah." got "I can't help"."""
+
+    async def asyncSetUp(self):
+        self.router = Router(CATALOGUE, RoutingConfig(fallback_intent="faq.general"))
+        self.gw = FakeGateway()
+        self.service, _, _ = make_service(dev_config(), gateway=self.gw)
+        await open_session(self.service)
+        self.n = 0
+
+    async def say(self, text):
+        self.n += 1
+        return await self.service.handle_turn(turn(text, f"t{self.n}"))
+
+    def calls(self, skill):
+        return [c for c in self.gw.calls if c["skill"] == skill]
+
+    def test_focus_is_taken_from_a_fixed_vocabulary(self):
+        cases = {
+            "How many portfolios do I have?": "accounts",
+            "How many positions do I hold?": "count",
+            "What is the smallest position in My Portfolio?": "smallest",
+            "which is my biggest holding": "largest",
+            "What is my portfolio worth?": "total",
+            "What do I own?": "list",
+            "How is my portfolio doing?": None,
+        }
+        for text, ask in cases.items():
+            self.assertEqual(extract_focus(text), {"ask": ask} if ask else None, text)
+
+    async def test_a_question_about_my_portfolio_is_not_bank_information(self):
+        decision = await self.router.route("What is the smallest position in My Portfolio?")
+        self.assertEqual((decision.intent.id, decision.needs_clarification), ("portfolio.overview", False))
+        # Fees and interest stay bank information even when they mention the portfolio.
+        self.assertIn("faq.general", self.router.rule_scores("What are the fees for my portfolio?"))
+
+    async def test_specific_question_gets_the_focus_and_no_market_prices(self):
+        r = await self.say("What is the smallest position in My Portfolio?")
+        self.assertEqual((r.type, r.intent), (ResponseType.ANSWER, "portfolio.overview"), r.text)
+        self.assertEqual(sent_data(self.calls("portfolio.holdings")[0])["slots"], {"focus": {"ask": "smallest"}})
+        self.assertEqual(self.calls("market.quotes"), [])
+        self.assertFalse(r.partial)  # prices were not needed, not missing
+
+    async def test_open_question_still_gets_market_prices(self):
+        r = await self.say("How is my portfolio doing?")
+        self.assertEqual(r.type, ResponseType.ANSWER)
+        self.assertEqual(len(self.calls("market.quotes")), 1)
+        self.assertNotIn("slots", sent_data(self.calls("portfolio.holdings")[0]))
+
+    async def test_yes_to_an_either_or_question_asks_which(self):
+        self.assertEqual((await self.say("sell my position in my holdings")).type, ResponseType.CLARIFY)
+        r = await self.say("Yeah.")
+        self.assertEqual(r.type, ResponseType.CLARIFY)
+        self.assertIn("Which one would you like: to sell part of a holding or an overview of your portfolio", r.text)
+        self.assertNotIn("can't help", r.text)
+        self.assertEqual(self.gw.calls, [])
+        r = await self.say("the portfolio one")
+        self.assertEqual((r.type, r.intent), (ResponseType.ANSWER, "portfolio.overview"), r.text)
+
+    async def test_endless_yes_hands_over(self):
+        await self.say("sell my position in my holdings")
+        types = [(await self.say("yes")).type for _ in range(self.service.cfg.routing.max_clarification_rounds)]
+        self.assertEqual(types[-1], ResponseType.HANDOVER, types)
+
+    def test_backend_answers_the_question_asked(self):
+        pf = {"account_mask": "****1234", "total_value_chf": 120_000, "positions": [
+            {"instrument": "Novartis registered share", "units": 400, "value_chf": 45_000, "weight_pct": 37.5},
+            {"instrument": "Gold ETC", "units": 20, "value_chf": 5_000, "weight_pct": 4.2},
+        ]}
+        self.assertEqual(answer_holdings(pf, "accounts"),
+                         "You have one portfolio with us, account ****1234, holding 2 positions worth about CHF 120,000.")
+        self.assertIn("smallest position is the Gold ETC: 20 units worth about CHF 5,000, 4.2 percent",
+                      answer_holdings(pf, "smallest"))
+        self.assertIn("largest position is the Novartis registered share", answer_holdings(pf, "largest"))
+        self.assertIn("the largest is the Novartis", answer_holdings(pf, ""))
 
 
 # ---------------------------------------------------------------- master agent: control commands

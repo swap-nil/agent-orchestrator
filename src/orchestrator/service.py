@@ -364,6 +364,10 @@ class OrchestratorService:
 
         work: list[_Work] = []
         follow = self._follow_up(pending, routing, verdict.text, kill) if pending else None
+        if follow is None and pending.get("kind") == "choice" and _normalise(verdict.text) in _YES:
+            response = self._ask_which(req, trace, state, pending, kill)
+            await self.c.store.put(state)
+            return response
         if follow is not None:
             await audit.record(req.session_id, "follow_up", {"kind": pending.get("kind"), "intent": follow.intent.id,
                                                              "asking": follow.asking}, **ids)
@@ -432,6 +436,23 @@ class OrchestratorService:
         best = max(overlap.values())
         top = [k for k, v in overlap.items() if v == best]
         return self.c.catalogue.intents[top[0]] if best > 0 and len(top) == 1 else None
+
+    def _ask_which(self, req: TurnRequest, trace: TraceContext, state: SessionState, pending: dict[str, Any],
+                   kill: KillSwitchConfig) -> TurnResponse:
+        """A plain yes to "would you like A or B?" picks neither: ask which, and keep the question open."""
+        m = self.cfg.messages
+        state.clarification_rounds += 1
+        if state.clarification_rounds > self.cfg.routing.max_clarification_rounds:
+            state.clarification_rounds = 0
+            return self._response(ResponseType.HANDOVER, m.handover, req, trace, reasons=["clarification_limit"])
+        candidates = [self.c.catalogue.intents[c] for c in pending.get("candidates") or []
+                      if c in self.c.catalogue.intents and c not in kill.disabled_intents]
+        if not candidates:
+            return self._response(ResponseType.CLARIFY, m.clarify_default, req, trace, reasons=["clarify"])
+        state.pending = {**pending, "candidates": [c.id for c in candidates]}
+        prompt = m.clarify_which.format(options=_join_or([c.label or c.description.lower() for c in candidates]))
+        return self._response(ResponseType.CLARIFY, prompt, req, trace, reasons=["clarify"],
+                              meta={"candidates": [c.id for c in candidates]})
 
     def _clarify(self, req: TurnRequest, trace: TraceContext, state: SessionState, routing: RoutingDecision,
                  text: str) -> TurnResponse:
@@ -507,7 +528,8 @@ class OrchestratorService:
         priority = intent.risk is RiskClass.R3
         with self.c.admission.admit(priority=priority) as adm:
             meta = {"risk": intent.risk.value, "degraded": adm.degraded}
-            plan = self.c.planner.build(intent, skip_optional=adm.degraded, unavailable_agents=set(kill.disabled_agents))
+            plan = self.c.planner.build(intent, skip_optional=adm.degraded, unavailable_agents=set(kill.disabled_agents),
+                                        filled_slots=set(slots))
             check = self.c.planner.validate(plan, user, kill, state.cost_used)
             kept = {st.id for st in plan.steps}
             await audit.record(req.session_id, "planned", {
@@ -549,7 +571,7 @@ class OrchestratorService:
                 response = await self._prepare_transaction(req, trace, state, user, plan, kill, slots)
             else:
                 response = await self._execute_reads(req, trace, state, user, plan, kill, slots, query)
-            skipped = [st.id for st in intent.steps if st.id not in kept]
+            skipped = [st.id for st in intent.steps if st.id not in kept and st.skip_if_slot not in slots]
             if skipped and response.type is ResponseType.ANSWER and not response.partial:
                 response.partial = True
                 if self.cfg.messages.partial_suffix and not response.text.endswith(self.cfg.messages.partial_suffix):

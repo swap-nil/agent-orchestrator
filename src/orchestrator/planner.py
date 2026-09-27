@@ -55,11 +55,15 @@ class Planner:
         self._acr_levels = acr_levels
         self._environment = environment
 
-    def build(self, intent: Intent, skip_optional: bool = False, unavailable_agents: set[str] | None = None) -> Plan:
+    def build(self, intent: Intent, skip_optional: bool = False, unavailable_agents: set[str] | None = None,
+              filled_slots: set[str] | None = None) -> Plan:
         """Optional steps are dropped under load (skip_optional) or when their agent is switched off,
-        so the customer still gets the required part of the answer, marked partial."""
+        so the customer still gets the required part of the answer, marked partial. Steps whose
+        ``skip_if_slot`` is filled are not needed for this question and are left out quietly."""
         unavailable = unavailable_agents or set()
-        steps = [s for s in intent.steps if not (s.optional and (skip_optional or s.agent in unavailable))]
+        filled = filled_slots or set()
+        steps = [s for s in intent.steps if not (s.optional and (skip_optional or s.agent in unavailable))
+                 and not (s.skip_if_slot and s.skip_if_slot in filled)]
         kept = {s.id for s in steps}
         # Drop dependencies on skipped optional steps.
         steps = [replace(s, depends_on=tuple(d for d in s.depends_on if d in kept)) for s in steps]

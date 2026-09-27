@@ -143,6 +143,7 @@ ORCH = {
     "messages.clarify_default": "Clarifying question when the intent has none.",
     "messages.clarify_choice": "Question when a request matches several intents; `{options}` lists their labels.",
     "messages.clarify_repeat_prefix": "Put before a clarifying question when the user repeats the same request.",
+    "messages.clarify_which": "Asked when a plain yes answers an either-or question; `{options}` lists the options.",
     "messages.out_of_scope": "Spoken when nothing (including the knowledge base) can answer the request; says what the assistant can do.",
     "messages.cancelled": "Spoken when the user cancels an open question (\"never mind\").",
     "messages.action_mismatch": "Spoken when a prepared transaction does not match what the user asked for; nothing is sent for approval.",
