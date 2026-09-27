@@ -143,6 +143,16 @@ log "Azure resources (Bicep; about 5 minutes on the first run)"
 PARAMS=$(umask 077; mktemp "$OUT/params.XXXXXX.json")
 trap 'rm -f "$PARAMS"' EXIT
 SSH_PUB=$(cat "$OUT/vm_ssh.pub")
+# Azure does not allow changing the VM's SSH key through the template. If the VM
+# already exists (e.g. .out/ was lost), keep its key in the template and add the
+# local key with the VM access extension instead.
+VM_KEY=$(az vm show -g "$RESOURCE_GROUP" -n "vm-$PREFIX" \
+  --query "osProfile.linuxConfiguration.ssh.publicKeys[0].keyData" -o tsv 2>/dev/null || true)
+if [ -n "$VM_KEY" ] && [ "$(printf '%s' "$VM_KEY" | awk '{print $2}')" != "$(awk '{print $2}' "$OUT/vm_ssh.pub")" ]; then
+  echo "VM vm-$PREFIX has a different SSH key: adding $OUT/vm_ssh.pub to it"
+  az vm user update -g "$RESOURCE_GROUP" -n "vm-$PREFIX" -u azureuser --ssh-key-value "$SSH_PUB" -o none
+  SSH_PUB="$VM_KEY"
+fi
 export PREFIX DNS_LABEL DEPLOYER_ID DEPLOYER_TYPE SSH_PUB VM_SIZE PG_PASSWORD REDIS_PASSWORD SESSION_KEY APPROVAL_KEY \
   DISPATCH_KEY TEMPORAL_KEY LIVEKIT_KEY LIVEKIT_SECRET COOKIE_SECRET
 export SSH_SOURCE_CIDR="${SSH_SOURCE_CIDR:-}"
