@@ -15,7 +15,8 @@ name: agent-orchestrator
 
 x-defaults: &defaults
   restart: unless-stopped
-  logging: {driver: json-file, options: {max-size: 10m, max-file: "3"}}
+  # labels: each log line carries its compose service name, which the collector uses.
+  logging: {driver: json-file, options: {max-size: 10m, max-file: "3", labels: com.docker.compose.service}}
 
 x-app: &app
   <<: *defaults
@@ -239,13 +240,18 @@ services:
     ports: ["127.0.0.1:8233:8233"]
     volumes: ["./data/temporal:/data"]
 
+  # Also ships every container's logs (Docker's json files) to Application Insights.
+  # Root in the container only to read those root-owned files; no capabilities.
   otel-collector:
     <<: *app
     image: otel/opentelemetry-collector-contrib:0.135.0
     command: ["--config=/etc/otelcol/config.yaml"]
+    user: "0"
     env_file: [secrets/otel.env]
     labels: {config-hash: "${OTEL_CONFIG_HASH:-}"}
-    volumes: ["./otel-collector.yaml:/etc/otelcol/config.yaml:ro"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
 
 volumes:
   caddy-data: {}

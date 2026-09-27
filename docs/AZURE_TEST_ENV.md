@@ -120,6 +120,7 @@ Commands on the VM run in `/opt/agent-orchestrator` as root. Two ways in:
 
 Also worth checking:
 - **Traces:** Application Insights (`appi-<prefix>`) shows traces from the orchestrator through each agent call.
+- **Logs:** the collector also ships every container's output to the same Application Insights, a minute or two behind. In `appi-<prefix>` → Logs: `traces | where timestamp > ago(30m) | where cloud_RoleName == "master-agent" | order by timestamp desc | project timestamp, message`. Drop the `cloud_RoleName` filter to see all services together. A multi-line Python traceback arrives as one row per line.
 - **Durable transactions:** the Temporal UI shows each transaction waiting for approval, then completing. Open an SSH tunnel, `ssh -i deploy/azure/.out/vm_ssh -L 8233:127.0.0.1:8233 azureuser@<host>`, and browse http://localhost:8233.
 - **Audit chain:** `sudo docker compose exec orchestrator python -m orchestrator.cli verify-audit <session-id>` on the VM.
 - **Evals on the VM:** `make azure-smoke` runs them with the other smoke checks.

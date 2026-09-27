@@ -1,11 +1,26 @@
 # OpenTelemetry Collector on the test VM: receive OTLP from the orchestrator,
 # strip GenAI content attributes as a second line of defence, export to
 # Application Insights (connection string from Key Vault, secrets/otel.env).
+# It also tails every container's log file, so all service logs land in the same
+# Application Insights (traces table), with the compose service as the role name.
 receivers:
   otlp:
     protocols:
       grpc: {endpoint: 0.0.0.0:4317}
       http: {endpoint: 0.0.0.0:4318}
+  filelog/containers:
+    include: [/var/lib/docker/containers/*/*-json.log]
+    # No checkpoint storage (read-only container): a restart skips lines written meanwhile.
+    start_at: end
+    operators:
+      # Docker json-file: log -> body, stream -> log.iostream, time -> timestamp.
+      - {type: container, format: docker, add_metadata_from_filepath: false}
+      # Set by the logging option "labels: com.docker.compose.service" in docker-compose.yaml.
+      - type: move
+        if: 'attributes.attrs != nil and attributes.attrs["com.docker.compose.service"] != nil'
+        from: attributes.attrs["com.docker.compose.service"]
+        to: resource["service.name"]
+      - {type: remove, if: 'attributes.attrs != nil', field: attributes.attrs}
 processors:
   memory_limiter: {check_interval: 1s, limit_mib: 400, spike_limit_mib: 100}
   attributes/strip-content:
@@ -13,6 +28,10 @@ processors:
       - {key: gen_ai.input.messages, action: delete}
       - {key: gen_ai.output.messages, action: delete}
       - {key: gen_ai.system_instructions, action: delete}
+  transform/trim-newline:
+    log_statements:
+      - context: log
+        statements: ['replace_pattern(body, "\r?\n$", "")']
   batch: {}
 exporters:
   azuremonitor:
@@ -24,3 +43,4 @@ service:
   pipelines:
     traces: {receivers: [otlp], processors: [memory_limiter, attributes/strip-content, batch], exporters: [azuremonitor]}
     metrics: {receivers: [otlp], processors: [memory_limiter, batch], exporters: [azuremonitor]}
+    logs: {receivers: [filelog/containers], processors: [memory_limiter, transform/trim-newline, batch], exporters: [azuremonitor]}
