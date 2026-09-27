@@ -1,3 +1,10 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Signing in</title></head>
-<body><!-- Blank redirect target for MSAL popups: the opener reads the response from this page's URL. --></body></html>
+<body>
+<!-- Redirect target for MSAL popups. msal-browser v5 no longer reads the popup's URL from the opener;
+     this page must hand the response back to the main window itself. -->
+<script type="module">
+import { broadcastResponseToMainFrame } from "https://cdn.jsdelivr.net/npm/@azure/msal-browser@5.23.0/redirect-bridge/+esm";
+broadcastResponseToMainFrame().catch((e) => { document.body.textContent = "Sign-in failed: " + e.message; });
+</script>
+</body></html>
