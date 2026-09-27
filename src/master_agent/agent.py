@@ -24,7 +24,7 @@ import os
 import uuid
 from typing import Any
 
-from livekit.agents import Agent, AgentSession, JobContext, StopResponse, WorkerOptions, cli
+from livekit.agents import Agent, AgentSession, JobContext, StopResponse, WorkerOptions, cli, room_io
 from livekit.agents.llm import ChatContext, ChatMessage
 
 from orchestrator.dispatch import DispatchError, DispatchInfo, verify_dispatch
@@ -54,9 +54,14 @@ class MasterAgent(Agent):
         await self.session.say(self._cfg.behaviour.greeting, allow_interruptions=True)
 
     async def on_user_turn_completed(self, turn_ctx: ChatContext, new_message: ChatMessage) -> None:
-        text = (new_message.text_content or "").strip()
+        await self.handle_turn(new_message.text_content or "")
+        raise StopResponse()  # the orchestrator's answer is final; no LLM reply
+
+    async def handle_turn(self, text: str) -> None:
+        """Send one user turn (spoken or typed) to the orchestrator and say its answer."""
+        text = text.strip()
         if not text:
-            raise StopResponse()
+            return
         trace = self._root.child()
         call = asyncio.create_task(
             self._client.turn(self._dispatch.session_id, text, trace.traceparent, self._dispatch.channel, uuid.uuid4().hex)
@@ -70,12 +75,11 @@ class MasterAgent(Agent):
         except OrchestratorUnavailable:
             log.warning("orchestrator unavailable", extra={"trace_id": trace.trace_id})
             self.session.say(b.unavailable)
-            raise StopResponse()
+            return
 
         self.session.say(response.get("text") or b.unavailable, allow_interruptions=response.get("type") != "approval_required")
         if response.get("type") == "approval_required" and response.get("approval"):
             await self._request_approval(response["approval"])
-        raise StopResponse()  # the orchestrator's answer is final; no LLM reply
 
     async def _request_approval(self, approval: dict[str, Any]) -> None:
         payload = json.dumps({
@@ -148,7 +152,18 @@ async def entrypoint(ctx: JobContext) -> None:
 
     ctx.add_shutdown_callback(_shutdown)
     session = _build_session(CONFIG)
-    await session.start(room=ctx.room, agent=MasterAgent(ctx, dispatch, client, CONFIG))
+    agent = MasterAgent(ctx, dispatch, client, CONFIG)
+
+    async def _on_text(sess: AgentSession, ev: room_io.TextInputEvent) -> None:
+        # Typed chat (lk.chat) skips on_user_turn_completed: the default callback calls
+        # generate_reply, which fails without an LLM. Send it to the orchestrator instead.
+        await sess.interrupt()
+        await agent.handle_turn(ev.text)
+
+    await session.start(
+        room=ctx.room, agent=agent,
+        room_options=room_io.RoomOptions(text_input=room_io.TextInputOptions(text_input_cb=_on_text)),
+    )
 
 
 if __name__ == "__main__":
